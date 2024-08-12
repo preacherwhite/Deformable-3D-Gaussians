@@ -45,6 +45,7 @@ class DeformModel:
         return xyz_new, rotation_placeholder , scale_placeholder
         #print(xyz.shape, time_emb.shape)
         #return self.deform(xyz, time_emb)
+        #return [0.0], [0.0], [0.0]
 
     def train_setting(self, training_args):
         l = [

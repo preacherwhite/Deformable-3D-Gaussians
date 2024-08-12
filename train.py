@@ -96,19 +96,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         time_interval = 1 / total_frame
 
         # Sample k cameras randomly without replacement
-        k = min(opt.num_cams_per_iter, len(viewpoint_stack))
-        sampled_indices = random.sample(range(len(viewpoint_stack)), k)
-        sampled_indices.sort()  # Sort to maintain temporal order
-        sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
-        # Remove the sampled cameras from the stack
-        for i in reversed(sampled_indices):
-            viewpoint_stack.pop(i)
+        
         
         # Get list of FID for the sampled cameras
-        sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
+        
         if iteration < opt.warm_up:
+            # in warmup, always take only one camera
+            sampled_indices = random.sample(range(len(viewpoint_stack)), 1)
+            sampled_cams =  [viewpoint_stack[i] for i in sampled_indices]
+            for i in reversed(sampled_indices):
+                viewpoint_stack.pop(i)
             d_xyz_list, d_rotation_list, d_scaling_list = [0.0], [0.0], [0.0]
+            assert len(sampled_cams) == 1
         else:
+            k = min(opt.num_cams_per_iter, len(viewpoint_stack))
+            sampled_indices = random.sample(range(len(viewpoint_stack)), k)
+            sampled_indices.sort()  # Sort to maintain temporal order
+            sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
+            # Remove the sampled cameras from the stack
+            for i in reversed(sampled_indices):
+                viewpoint_stack.pop(i)
+            sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
             # N = gaussians.get_xyz.shape[0]
             # time_input = fid.unsqueeze(0).expand(N, -1)
 
@@ -120,6 +128,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         
         loss = 0.0
         Ll1 = 0.0
+        assert len(sampled_cams) == len(d_xyz_list)
         for viewpoint_cam, d_xyz, d_rotation, d_scaling in zip(sampled_cams, d_xyz_list, d_rotation_list, d_scaling_list):
             if dataset.load2gpu_on_the_fly:
                 viewpoint_cam.load2device()

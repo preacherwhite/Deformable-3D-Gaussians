@@ -84,10 +84,10 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.sequence_length = 6
-        self.num_cams_per_iter = 6
-        self.direct_compute = True
-        self.iterations = 10000
+        self.sequence_length = 150
+        self.num_cams_per_iter = 150
+        self.direct_compute = False
+        self.iterations = 3000
         self.warm_up = 3000
         self.position_lr_init = 0.0016
         self.position_lr_final = 0.000016
