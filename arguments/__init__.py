@@ -60,6 +60,12 @@ class ModelParams(ParamGroup):
         self.load2gpu_on_the_fly = False
         self.is_blender = False
         self.is_6dof = False
+        self.max_gaussians = 10000
+        self.D = 3
+        self.W = 64
+        self.input_ch = 3
+        self.output_ch = 59
+        self.multires = 10
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -78,13 +84,16 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 40_000
-        self.warm_up = 3_000
-        self.position_lr_init = 0.00016
-        self.position_lr_final = 0.0000016
+        self.sequence_length = 6
+        self.num_cams_per_iter = 6
+        self.direct_compute = True
+        self.iterations = 10000
+        self.warm_up = 3000
+        self.position_lr_init = 0.0016
+        self.position_lr_final = 0.000016
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 30_000
-        self.deform_lr_max_steps = 40_000
+        self.position_lr_max_steps = 6000
+        self.deform_lr_max_steps = 10000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.001

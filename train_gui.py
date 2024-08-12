@@ -95,7 +95,7 @@ class GUI:
 
         self.tb_writer = prepare_output_and_logger(dataset)
         self.gaussians = GaussianModel(dataset.sh_degree)
-        self.deform = DeformModel(is_blender=dataset.is_blender, is_6dof=dataset.is_6dof)
+        self.deform = DeformModel(is_blender=dataset.is_blender, is_6dof=dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
         self.deform.train_setting(opt)
 
         self.scene = Scene(dataset, self.gaussians)

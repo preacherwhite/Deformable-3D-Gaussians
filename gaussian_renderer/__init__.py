@@ -30,7 +30,7 @@ def quaternion_multiply(q1, q2):
 
 
 def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz, d_rotation, d_scaling, is_6dof=False,
-           scaling_modifier=1.0, override_color=None):
+           scaling_modifier=1.0, override_color=None, direct_compute = False):
     """
     Render the scene.
 
@@ -66,8 +66,9 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-
-    if is_6dof:
+    if direct_compute:
+        means3D = d_xyz
+    elif is_6dof:
         if torch.is_tensor(d_xyz) is False:
             means3D = pc.get_xyz
         else:
@@ -85,6 +86,10 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
+        # if direct_compute:
+        #     scales = d_scaling
+        #     rotations = d_rotation
+        # else:
         scales = pc.get_scaling + d_scaling
         rotations = pc.get_rotation + d_rotation
 

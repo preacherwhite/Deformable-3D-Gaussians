@@ -84,17 +84,25 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
+    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float, max_gaussians: int = None):
         self.spatial_lr_scale = 5
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+
+        # If max_gaussians is set and less than the number of input points, randomly sample
+        print(max_gaussians)
+        if max_gaussians and fused_point_cloud.shape[0] > max_gaussians:
+            indices = torch.randperm(fused_point_cloud.shape[0])[:max_gaussians]
+            fused_point_cloud = fused_point_cloud[indices]
+            fused_color = fused_color[indices]
+
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
@@ -177,7 +185,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
-    def load_ply(self, path, og_number_points=-1):
+    def load_ply(self, path, og_number_points=-1, max_gaussians=None):
         self.og_number_points = og_number_points
         plydata = PlyData.read(path)
 
@@ -186,36 +194,41 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["z"])), axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
 
+        # If max_gaussians is set and less than the number of points, randomly sample
+        if max_gaussians and xyz.shape[0] > max_gaussians:
+            indices = np.random.choice(xyz.shape[0], max_gaussians, replace=False)
+            xyz = xyz[indices]
+            opacities = opacities[indices]
+        
+
         features_dc = np.zeros((xyz.shape[0], 3, 1))
-        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
-        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
-        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])[indices] if max_gaussians else np.asarray(plydata.elements[0]["f_dc_0"])
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])[indices] if max_gaussians else np.asarray(plydata.elements[0]["f_dc_1"])
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])[indices] if max_gaussians else np.asarray(plydata.elements[0]["f_dc_2"])
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         assert len(extra_f_names) == 3 * (self.max_sh_degree + 1) ** 2 - 3
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
-            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])[indices] if max_gaussians else np.asarray(plydata.elements[0][attr_name])
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scales = np.zeros((xyz.shape[0], len(scale_names)))
         for idx, attr_name in enumerate(scale_names):
-            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])[indices] if max_gaussians else np.asarray(plydata.elements[0][attr_name])
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
         rots = np.zeros((xyz.shape[0], len(rot_names)))
         for idx, attr_name in enumerate(rot_names):
-            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])[indices] if max_gaussians else np.asarray(plydata.elements[0][attr_name])
+
+        print(f"Number of Gaussians loaded: {xyz.shape[0]}")
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._features_dc = nn.Parameter(
-            torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(
-                True))
-        self._features_rest = nn.Parameter(
-            torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(
-                True))
+        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))

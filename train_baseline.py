@@ -22,7 +22,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-import random
+
 try:
     from torch.utils.tensorboard import SummaryWriter
 
@@ -34,7 +34,7 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    deform = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
+    deform = DeformModel(dataset.is_blender, dataset.is_6dof)
     deform.train_setting(opt)
 
     scene = Scene(dataset, gaussians)
@@ -50,19 +50,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     ema_loss_for_log = 0.0
     best_psnr = 0.0
     best_iteration = 0
-
-
-    batch_size = opt.num_cams_per_iter
-    non_warmup_iterations = opt.iterations - opt.warm_up
-    iterations = opt.warm_up + (non_warmup_iterations // batch_size)
-    progress_bar = tqdm(range(iterations), desc="Training progress")
-
-    testing_iterations = [opt.warm_up + ((it - opt.warm_up) // batch_size)for it in testing_iterations]
-    
-    saving_iterations = [opt.warm_up + ((it - opt.warm_up)  // batch_size) for it in saving_iterations]
-
+    progress_bar = tqdm(range(opt.iterations), desc="Training progress")
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
-    for iteration in range(1, (iterations) + 1):
+    for iteration in range(1, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -89,65 +79,50 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
-            if iteration >= opt.warm_up:
-                viewpoint_stack = viewpoint_stack[:opt.sequence_length]
 
         total_frame = len(viewpoint_stack)
         time_interval = 1 / total_frame
 
-        # Sample k cameras randomly without replacement
-        k = min(opt.num_cams_per_iter, len(viewpoint_stack))
-        sampled_indices = random.sample(range(len(viewpoint_stack)), k)
-        sampled_indices.sort()  # Sort to maintain temporal order
-        sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
-        # Remove the sampled cameras from the stack
-        for i in reversed(sampled_indices):
-            viewpoint_stack.pop(i)
         
-        # Get list of FID for the sampled cameras
-        sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
+
+        #test if viewpoint stack are ordered by time for fixed intervals of 10 cameras
+        # for i in range(len(viewpoint_stack)):
+        #     print(viewpoint_stack[i].fid)
+        # Viewpoint is randomly selected. How does the stack type pop? can we pop out a series of viewpoint in the order of time?
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+        
+        if dataset.load2gpu_on_the_fly:
+            viewpoint_cam.load2device()
+        fid = viewpoint_cam.fid
+
         if iteration < opt.warm_up:
-            d_xyz_list, d_rotation_list, d_scaling_list = [0.0], [0.0], [0.0]
+            d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
         else:
-            # N = gaussians.get_xyz.shape[0]
-            # time_input = fid.unsqueeze(0).expand(N, -1)
+            N = gaussians.get_xyz.shape[0]
+            time_input = fid.unsqueeze(0).expand(N, -1)
 
-            ast_noise = 0 #if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
-
+            ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
             # Deform is called to calculate gaussian parameters at time t according to the current viewpoint camera. We need to change this so 
             # A series of t from a series of viewpoints are used to calculate the gaussian parameters at different time frames
-            d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
+            d_xyz, d_rotation, d_scaling = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)
+        #print('d_xyz:', d_xyz.shape)
+        # Render
         
-        loss = 0.0
-        Ll1 = 0.0
-        for viewpoint_cam, d_xyz, d_rotation, d_scaling in zip(sampled_cams, d_xyz_list, d_rotation_list, d_scaling_list):
-            if dataset.load2gpu_on_the_fly:
-                viewpoint_cam.load2device()
-            fid = viewpoint_cam.fid
-
-            # Render
-            if iteration < opt.warm_up: 
-                render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof)
-            else:
-                render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof, direct_compute = opt.direct_compute)
-            image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
-                "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
-            # depth = render_pkg_re["depth"]
+        render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof)
+        image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
+            "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
+        # depth = render_pkg_re["depth"]
 
         # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 += l1_loss(image, gt_image)
-            # accumulate loss for each viewpoint
-            loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-            
-        iter_end.record()
-        loss /= len(sampled_cams)
-        Ll1 /= len(sampled_cams)
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
-        
-        for viewpoint_cam in sampled_cams:
-            if dataset.load2gpu_on_the_fly:
-                viewpoint_cam.load2device('cpu')
+
+        iter_end.record()
+
+        if dataset.load2gpu_on_the_fly:
+            viewpoint_cam.load2device('cpu')
 
         with torch.no_grad():
             # Progress bar
@@ -191,14 +166,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
             # Optimizer step
             if iteration < opt.iterations:
-                #if iteration < opt.warm_up:
-                    gaussians.optimizer.step()
-                    gaussians.update_learning_rate(iteration)
-                    gaussians.optimizer.zero_grad(set_to_none=True)
-                #else:
-                    deform.optimizer.step()
-                    deform.optimizer.zero_grad()
-                    deform.update_learning_rate(iteration)
+                gaussians.optimizer.step()
+                gaussians.update_learning_rate(iteration)
+                deform.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none=True)
+                deform.optimizer.zero_grad()
+                deform.update_learning_rate(iteration)
 
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
 
@@ -227,7 +200,7 @@ def prepare_output_and_logger(args):
 
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc,
-                    renderArgs, deform, load2gpu_on_the_fly, is_6dof=False, seq_length=150):
+                    renderArgs, deform, load2gpu_on_the_fly, is_6dof=False):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -237,9 +210,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras': scene.getTestCameras()[:seq_length]},
+        validation_configs = ({'name': 'test', 'cameras': scene.getTestCameras()},
                               {'name': 'train',
-                               'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras()[:seq_length])] for idx in
+                               'cameras': [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in
                                            range(5, 30, 5)]})
 
         for config in validation_configs:
@@ -251,10 +224,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         viewpoint.load2device()
                     fid = viewpoint.fid
                     xyz = scene.gaussians.get_xyz
-                    #time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-                    d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), [fid])
+                    time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+                    d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
                     image = torch.clamp(
-                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof)["render"],
+                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, is_6dof)["render"],
                         0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     images = torch.cat((images, image.unsqueeze(0)), dim=0)
@@ -296,7 +269,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[7000, 8000, 9000] + list(range(10000, 40001, 1000)))
+                        default=[5000, 6000, 7_000] + list(range(10000, 40001, 1000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(sys.argv[1:])

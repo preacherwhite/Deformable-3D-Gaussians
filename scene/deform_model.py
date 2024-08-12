@@ -1,20 +1,50 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.time_utils import DeformNetwork
+from utils.time_utils import DeformNetworkODE, DeformNetwork
 import os
 from utils.system_utils import searchForMaxIteration
 from utils.general_utils import get_expon_lr_func
 
-
+from torchdiffeq import odeint_adjoint
 class DeformModel:
-    def __init__(self, is_blender=False, is_6dof=False):
-        self.deform = DeformNetwork(is_blender=is_blender, is_6dof=is_6dof).cuda()
+    def __init__(self, is_blender=False, is_6dof=False, D = 8, W = 256, input_ch = 3, output_ch = 59, multires = 10):
+        self.deform = DeformNetworkODE(is_blender=is_blender, is_6dof=is_6dof, D = D, W = W, input_ch = input_ch, output_ch = output_ch, multires = multires).cuda()
         self.optimizer = None
         self.spatial_lr_scale = 5
 
-    def step(self, xyz, time_emb):
-        return self.deform(xyz, time_emb)
+    def step(self, xyz, time_emb):  
+        # xyz: N x 3
+        # time_emb: N x 1
+        #initial_state = torch.cat([xyz, initial_rotation, initial_scaling], dim=-1)
+        #print('step_sizes=', xyz.shape,time_emb.shape)
+        
+        # t is the same for the entire gaussian set, so we can use the same t for all gaussians
+        is_val = len(time_emb) == 1
+        zero_start = time_emb[0] == 0
+        if zero_start.item() and is_val:
+            return [xyz] , [torch.zeros([xyz.shape[0], 4]).to(xyz.device)], [torch.zeros([xyz.shape[0],3]).to(xyz.device)]
+        rtol = 0.001
+        atol = 0.0001
+        if not zero_start:
+            time_emb = [0.0] + time_emb
+
+        t_interval = torch.Tensor(time_emb).to(xyz.device)
+        #print('t_interval=', t_interval.shape, 'xyz=', xyz.shape)
+        ode_value = odeint_adjoint(self.deform, xyz,t_interval, rtol= rtol, atol=atol,method='rk4', options={'step_size': 0.0025})
+        xyz_new = torch.squeeze(ode_value)
+        #print(xyz_new.shape)
+        if is_val:
+            if not zero_start:
+                xyz_new = xyz_new[1].unsqueeze(0)
+        elif not zero_start:
+            xyz_new = xyz_new[1:]
+        rotation_placeholder = torch.zeros([xyz_new.shape[0],xyz_new.shape[1], 4]).to(xyz.device)
+        scale_placeholder = torch.zeros([xyz_new.shape[0],xyz_new.shape[1],3]).to(xyz.device)
+        #print(xyz_new.shape, rotation_placeholder.shape, scale_placeholder.shape)
+        return xyz_new, rotation_placeholder , scale_placeholder
+        #print(xyz.shape, time_emb.shape)
+        #return self.deform(xyz, time_emb)
 
     def train_setting(self, training_args):
         l = [
