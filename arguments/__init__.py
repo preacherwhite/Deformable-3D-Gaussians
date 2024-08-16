@@ -49,6 +49,7 @@ class ParamGroup:
 
 class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
+        self.is_ode = True
         self.sh_degree = 3
         self._source_path = ""
         self._model_path = ""
@@ -61,8 +62,8 @@ class ModelParams(ParamGroup):
         self.is_blender = False
         self.is_6dof = False
         self.max_gaussians = 10000
-        self.D = 3
-        self.W = 64
+        self.D = 8
+        self.W = 256
         self.input_ch = 3
         self.output_ch = 59
         self.multires = 10
@@ -84,16 +85,19 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.sequence_length = 150
-        self.num_cams_per_iter = 150
-        self.direct_compute = False
-        self.iterations = 3000
-        self.warm_up = 3000
-        self.position_lr_init = 0.0016
-        self.position_lr_final = 0.000016
+        self.scale_lr = False
+        self.direct_compute = True
+        self.sequence_length = 30
+        self.num_cams_per_iter = 10
+        self.spread_out_sequence= False
+        
+        self.iterations = 40_000
+        self.warm_up = 3_000
+        self.position_lr_init = 0.00016
+        self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 6000
-        self.deform_lr_max_steps = 10000
+        self.position_lr_max_steps = 30_000
+        self.deform_lr_max_steps = 40_000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.001
@@ -129,3 +133,15 @@ def get_combined_args(parser: ArgumentParser):
         if v != None:
             merged_dict[k] = v
     return Namespace(**merged_dict)
+
+def add_base_args(parser):
+    ModelParams(parser)
+    OptimizationParams(parser)
+    PipelineParams(parser)
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--test_iterations", nargs="+", type=int,
+                        default=[7000, 8000, 9000] + list(range(10000, 40001, 1000)))
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 7_000, 10_000, 20_000, 30_000, 40000])
+    parser.add_argument("--quiet", action="store_true")

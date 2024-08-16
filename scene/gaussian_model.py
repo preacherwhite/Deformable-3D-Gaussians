@@ -134,10 +134,14 @@ class GaussianModel:
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init * self.spatial_lr_scale,
-                                                    lr_final=training_args.position_lr_final * self.spatial_lr_scale,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+        lr_init = training_args.position_lr_init * self.spatial_lr_scale # * training_args.num_cams_per_iter
+        lr_final = training_args.position_lr_final * self.spatial_lr_scale # * training_args.num_cams_per_iter
+        lr_delay_mult = training_args.position_lr_delay_mult
+        max_steps = training_args.position_lr_max_steps
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=lr_init,
+                                                    lr_final=lr_final,
+                                                    lr_delay_mult=lr_delay_mult,
+                                                    max_steps=max_steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''

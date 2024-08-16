@@ -33,21 +33,10 @@ except ImportError:
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
-    # tune parameters to fit in different sequence lengths
-    full_iteration = opt.iterations
-    opt.iterations = round((full_iteration - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
-    opt.deform_lr_max_steps = opt.iterations
-    opt.position_lr_max_steps = round((opt.position_lr_max_steps - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
-    opt.densify_until_iter = round((opt.densify_until_iter - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
-    #start training
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    if dataset.is_ode:
-        print("Using ODE for deformation")
-        deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
-    else:
-        print("Using DeformModel")
-        deform = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
+    deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
+    deform_baseline = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
     deform.train_setting(opt)
 
     scene = Scene(dataset, gaussians)
@@ -76,6 +65,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
     for iteration in range(1, (iterations) + 1):
+        if network_gui.conn == None:
+            network_gui.try_connect()
+        while network_gui.conn != None:
+            try:
+                net_image_bytes = None
+                custom_cam, do_training, pipe.do_shs_python, pipe.do_cov_python, keep_alive, scaling_modifer = network_gui.receive()
+                if custom_cam != None:
+                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer)["render"]
+                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2,
+                                                                                                               0).contiguous().cpu().numpy())
+                network_gui.send(net_image_bytes, dataset.source_path)
+                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
+                    break
+            except Exception as e:
+                network_gui.conn = None
+
         iter_start.record()
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -83,26 +88,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack or iteration == opt.warm_up:
+        if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             if iteration >= opt.warm_up:
-                # Sort the viewpoints by fid
+                # this is to control the number of cameras we use in total
                 viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
-                
-                # Calculate the total number of viewpoints
-                total_viewpoints = len(viewpoint_stack)
-                
-                # Calculate the step size for uniform distribution
-                step = (total_viewpoints - 1) / (opt.sequence_length - 1)
-                
-                # Select uniformly spread out viewpoints
-                if opt.spread_out_sequence:
-                    selected_indices = [int(round(i * step)) for i in range(opt.sequence_length)]
-                    viewpoint_stack = [viewpoint_stack[i] for i in selected_indices]
-                else:
-                    viewpoint_stack = viewpoint_stack[:opt.sequence_length]
+                viewpoint_stack = viewpoint_stack[:opt.sequence_length]
 
         total_frame = len(viewpoint_stack)
+        time_interval = 1 / total_frame
 
         k = min(opt.num_cams_per_iter, len(viewpoint_stack))
         if iteration < opt.warm_up:
@@ -120,7 +114,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Remove the sampled cameras from the stack
             viewpoint_stack = [cam for i, cam in enumerate(viewpoint_stack) if i not in sampled_indices]
             sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
-            
             # N = gaussians.get_xyz.shape[0]
             # time_input = fid.unsqueeze(0).expand(N, -1)
 
@@ -178,7 +171,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Log and save
             cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                                        testing_iterations, scene, render, (pipe, background), deform,
-                                       dataset.load2gpu_on_the_fly, dataset.is_6dof, seq_length=opt.sequence_length, is_ode=dataset.is_ode)
+                                       dataset.load2gpu_on_the_fly, dataset.is_6dof)
             if iteration in testing_iterations:
                 if cur_psnr.item() > best_psnr:
                     best_psnr = cur_psnr.item()
@@ -242,7 +235,7 @@ def prepare_output_and_logger(args):
 
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc,
-                    renderArgs, deform, load2gpu_on_the_fly, is_6dof=False, seq_length=150, is_ode=False):
+                    renderArgs, deform, load2gpu_on_the_fly, is_6dof=False, seq_length=150):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -269,7 +262,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     #time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
                     d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), [fid])
                     image = torch.clamp(
-                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof, direct_compute=is_ode)["render"],
+                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof)["render"],
                         0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     images = torch.cat((images, image.unsqueeze(0)), dim=0)
