@@ -9,8 +9,8 @@ OptimizationParams = dict(
     scale_lr = False,
     direct_compute = True,
     sequence_length = 30,
-    num_cams_per_iter = 1,
+    num_cams_per_iter = 30,
     spread_out_sequence = True,
-    position_lr_init = 0.0001,
-    position_lr_final = 0.0000001,
+    position_lr_init = 0.001,
+    position_lr_final = 0.0001
 )

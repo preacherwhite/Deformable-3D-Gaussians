@@ -39,6 +39,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     opt.deform_lr_max_steps = opt.iterations
     opt.position_lr_max_steps = round((opt.position_lr_max_steps - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
     opt.densify_until_iter = round((opt.densify_until_iter - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
+
+    print("Training for {} iterations".format(opt.iterations))
+    print("Densifying until iteration {}".format(opt.densify_until_iter))
+    print("Position learning rate max steps: {}".format(opt.position_lr_max_steps))
+    print("Deform learning rate max steps: {}".format(opt.deform_lr_max_steps))
+
     #start training
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -73,7 +79,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     testing_iterations = [opt.warm_up + ((it - opt.warm_up) // batch_size)for it in testing_iterations]
     
     saving_iterations = [opt.warm_up + ((it - opt.warm_up)  // batch_size) for it in saving_iterations]
-
+    saving_iterations.append(iterations)
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
     for iteration in range(1, (iterations) + 1):
         iter_start.record()
@@ -129,9 +135,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Deform is called to calculate gaussian parameters at time t according to the current viewpoint camera. We need to change this so 
             # A series of t from a series of viewpoints are used to calculate the gaussian parameters at different time frames
             d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
+
+
         
         loss = 0.0
         Ll1 = 0.0
+        visibility_filter_list = []
+        render_pkg_re_list = []
+        
         assert len(sampled_cams) == len(d_xyz_list)
         for viewpoint_cam, d_xyz, d_rotation, d_scaling in zip(sampled_cams, d_xyz_list, d_rotation_list, d_scaling_list):
             if dataset.load2gpu_on_the_fly:
@@ -146,6 +157,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
                 "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
             # depth = render_pkg_re["depth"]
+            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
+                                                                 radii[visibility_filter])
+            visibility_filter_list.append(visibility_filter)
+            render_pkg_re_list.append(render_pkg_re)
 
         # Loss
             gt_image = viewpoint_cam.original_image.cuda()
@@ -170,11 +185,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-
-            # Keep track of max radii in image-space for pruning
-            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
-                                                                 radii[visibility_filter])
-
             # Log and save
             cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                                        testing_iterations, scene, render, (pipe, background), deform,
@@ -187,12 +197,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-                deform.save_weights(args.model_path, iteration)
+                deform.save_weights(dataset.model_path, iteration)
 
             # Densification
             if iteration < opt.densify_until_iter:
-                viewspace_point_tensor_densify = render_pkg_re["viewspace_points_densify"]
-                gaussians.add_densification_stats(viewspace_point_tensor_densify, visibility_filter)
+                for visibility_filter, render_pkg_re in zip(visibility_filter_list, render_pkg_re_list):
+                    viewspace_point_tensor_densify = render_pkg_re["viewspace_points_densify"]
+                    gaussians.add_densification_stats(viewspace_point_tensor_densify, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
@@ -204,13 +215,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
             # Optimizer step
             if iteration < opt.iterations:
-                #if iteration < opt.warm_up:
+                if opt.freeze_gaussians:
+                    if iteration < opt.warm_up:
+                        gaussians.optimizer.step()
+                        gaussians.update_learning_rate(iteration)
+                        gaussians.optimizer.zero_grad(set_to_none=True)
+
+                    else:
+                        deform.optimizer.step()
+                        deform.optimizer.zero_grad()
+                        deform.update_learning_rate(iteration)
+                else:
                     gaussians.optimizer.step()
                     gaussians.update_learning_rate(iteration)
-                    gaussians.optimizer.zero_grad(set_to_none=True)
-
-                #else:
                     deform.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none=True)
                     deform.optimizer.zero_grad()
                     deform.update_learning_rate(iteration)
 
@@ -314,9 +333,14 @@ if __name__ == "__main__":
                         default=[7000, 8000, 9000] + list(range(10000, 40001, 1000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--configs", type=str, default = "")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
-
+    if args.configs:
+        import mmcv
+        from utils.params_utils import merge_hparams
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

@@ -327,12 +327,12 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
-                        scene.getTrainCameras()[:frames], gaussians, pipeline,
+                        scene.getTrainCameras(), gaussians, pipeline,
                         background, deform, dataset.is_ode)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
-                        scene.getTestCameras()[:frames], gaussians, pipeline,
+                        scene.getTestCameras(), gaussians, pipeline,
                         background, deform, dataset.is_ode)
 
 
@@ -347,7 +347,15 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
     parser.add_argument("--frames",default=150,type=int)
+    parser.add_argument("--configs", type=str, default = "")
     args = get_combined_args(parser)
+
+    if args.configs:
+        import mmcv
+        from utils.params_utils import merge_hparams
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
+
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)

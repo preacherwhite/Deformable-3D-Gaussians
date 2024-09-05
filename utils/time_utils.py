@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils.rigid_utils import exp_se3
-from torchdiffeq import odeint_adjoint
+
 
 def get_embedder(multires, i=1):
     if i == -1:
@@ -191,7 +191,11 @@ class DeformNetworkODE(nn.Module):
         Returns:
             torch.Tensor: Gradient of the state with respect to time.
         """
+        # if(not t.shape[0] == x.shape[0]):
+        #     t_emb = t.repeat(x.shape[0],1)
         t_emb = t.repeat(x.shape[0],1)
+        # else:
+        #     t_emb = t.unsqueeze(1)
         t_emb = self.embed_time_fn(t_emb)
         if self.is_blender:
             t_emb = self.timenet(t_emb)  # better for D-NeRF Dataset

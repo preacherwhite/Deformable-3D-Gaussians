@@ -407,17 +407,18 @@ def readNerfiesCameras(path):
     scene_center = scene_json['center']
 
     name = path.split('/')[-2]
+    print(name)
     if name.startswith('vrig'):
         train_img = dataset_json['train_ids']
         val_img = dataset_json['val_ids']
         all_img = train_img + val_img
         ratio = 0.25
-    elif name.startswith('NeRF'):
+    elif name.startswith('NeRF') or name.startswith('nerf'):
         train_img = dataset_json['train_ids']
         val_img = dataset_json['val_ids']
         all_img = train_img + val_img
         ratio = 1.0
-    elif name.startswith('interp'):
+    elif name.startswith('interp') or name.startswith('hyper'):
         all_id = dataset_json['ids']
         train_img = all_id[::4]
         val_img = all_id[2::4]
@@ -475,14 +476,12 @@ def readNerfiesCameras(path):
 def readNerfiesInfo(path, eval):
     print("Reading Nerfies Info")
     cam_infos, train_num, scene_center, scene_scale = readNerfiesCameras(path)
-
     if eval:
         train_cam_infos = cam_infos[:train_num]
         test_cam_infos = cam_infos[train_num:]
     else:
         train_cam_infos = cam_infos
         test_cam_infos = []
-
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
     ply_path = os.path.join(path, "points3d.ply")

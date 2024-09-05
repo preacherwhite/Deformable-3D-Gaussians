@@ -90,7 +90,9 @@ class OptimizationParams(ParamGroup):
         self.sequence_length = 30
         self.num_cams_per_iter = 10
         self.spread_out_sequence= False
-        
+        self.weight_decay = 0.0
+        self.freeze_gaussians = False
+
         self.iterations = 40_000
         self.warm_up = 3_000
         self.position_lr_init = 0.00016
@@ -133,15 +135,3 @@ def get_combined_args(parser: ArgumentParser):
         if v != None:
             merged_dict[k] = v
     return Namespace(**merged_dict)
-
-def add_base_args(parser):
-    ModelParams(parser)
-    OptimizationParams(parser)
-    PipelineParams(parser)
-    parser.add_argument('--ip', type=str, default="127.0.0.1")
-    parser.add_argument('--port', type=int, default=6009)
-    parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[7000, 8000, 9000] + list(range(10000, 40001, 1000)))
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 7_000, 10_000, 20_000, 30_000, 40000])
-    parser.add_argument("--quiet", action="store_true")
