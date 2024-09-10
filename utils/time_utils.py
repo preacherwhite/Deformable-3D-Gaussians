@@ -134,7 +134,7 @@ class DeformNetwork(nn.Module):
         return d_xyz , rotation, scaling
 
 class DeformNetworkODE(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False, use_linear = False):
         super(DeformNetworkODE, self).__init__()
         self.D = D
         self.W = W
@@ -146,6 +146,13 @@ class DeformNetworkODE(nn.Module):
         self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, 1)
         self.embed_fn, xyz_input_ch = get_embedder(multires, 3)
         self.input_ch = xyz_input_ch + time_input_ch
+
+        self.is_blender = is_blender
+        self.is_6dof = is_6dof
+        self.use_linear = use_linear
+        if use_linear:
+            self.linear_layer = nn.Linear(self.input_ch, 3)
+            return
 
         if is_blender:
             # Better for D-NeRF Dataset
@@ -167,9 +174,6 @@ class DeformNetworkODE(nn.Module):
                     nn.Linear(W, W) if i not in self.skips else nn.Linear(W + self.input_ch, W)
                     for i in range(D - 1)]
             )
-
-        self.is_blender = is_blender
-        self.is_6dof = is_6dof
 
 
         # Defining branches for deformation calculation
@@ -197,10 +201,16 @@ class DeformNetworkODE(nn.Module):
         # else:
         #     t_emb = t.unsqueeze(1)
         t_emb = self.embed_time_fn(t_emb)
-        if self.is_blender:
-            t_emb = self.timenet(t_emb)  # better for D-NeRF Dataset
         #print('x', x)
         x_emb = self.embed_fn(x)
+        if self.use_linear:
+            # Concatenate t_emb and x_emb for linear mapping
+            h = torch.cat([x_emb, t_emb], dim=-1)
+            return self.linear_layer(h)
+        
+        if self.is_blender:
+            t_emb = self.timenet(t_emb)  # better for D-NeRF Dataset
+
         h = torch.cat([x_emb, t_emb], dim=-1)
         for i, l in enumerate(self.linear):
             h = self.linear[i](h)

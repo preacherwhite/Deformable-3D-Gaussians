@@ -67,6 +67,7 @@ class ModelParams(ParamGroup):
         self.input_ch = 3
         self.output_ch = 59
         self.multires = 10
+        self.use_linear = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -92,6 +93,8 @@ class OptimizationParams(ParamGroup):
         self.spread_out_sequence= False
         self.weight_decay = 0.0
         self.freeze_gaussians = False
+        self.rtol = 1e-3    
+        self.atol = 1e-4
 
         self.iterations = 40_000
         self.warm_up = 3_000

@@ -24,9 +24,10 @@ from gaussian_renderer import GaussianModel
 import imageio
 import numpy as np
 import time
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
-
-def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, is_ode):
+def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, is_ode, trajectory_only):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
@@ -35,6 +36,49 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
     makedirs(gts_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
 
+    # New code for trajectory visualization
+    k = 100  # Number of Gaussians to sample
+    n_frames = len(views)
+    
+    # Randomly sample k Gaussians
+    n_gaussians = gaussians.get_xyz.shape[0]
+    sampled_indices = np.random.choice(n_gaussians, k, replace=False)
+    
+    # Initialize arrays to store trajectories
+    trajectories = np.zeros((k, n_frames, 3))
+    
+    # Collect trajectory data
+    for frame, view in enumerate(tqdm(views, desc="Collecting trajectory data")):
+        fid = view.fid
+        xyz = gaussians.get_xyz
+        d_xyz, _, _ = deform.step(xyz.detach(), [fid])
+        
+        # Store the positions of sampled Gaussians
+        if is_ode:
+            trajectories[:, frame, :] = (d_xyz[0][sampled_indices]).cpu().numpy()
+        else:
+            trajectories[:, frame, :] = (xyz[sampled_indices] + d_xyz[0][sampled_indices]).cpu().numpy()
+    
+    # Visualize trajectories
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    for i in range(k):
+        ax.plot(trajectories[i, :, 0], trajectories[i, :, 1], trajectories[i, :, 2], label=f'Gaussian {i+1}')
+    
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.legend()
+    plt.title(f'3D Trajectories of {k} Sampled Gaussians')
+    
+    # Save the plot
+    trajectory_path = os.path.join(model_path, name, f"ours_{iteration}", "trajectories")
+    makedirs(trajectory_path, exist_ok=True)
+    plt.savefig(os.path.join(trajectory_path, 'gaussian_trajectories.png'))
+    plt.close()
+    if trajectory_only:
+        return
     t_list = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
@@ -299,12 +343,12 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, it
 
 
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
-                mode: str, frames: int):
+                mode: str, frames: int, trajectory_only: bool):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         if dataset.is_ode:  
-            deform =  DeformModelODE(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires)
+            deform =  DeformModelODE(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires, use_linear=dataset.use_linear)
         else:
             deform = DeformModel(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires)
         deform.load_weights(dataset.model_path)
@@ -328,12 +372,12 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
                         scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform, dataset.is_ode)
+                        background, deform, dataset.is_ode, trajectory_only)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform, dataset.is_ode)
+                        background, deform, dataset.is_ode, trajectory_only)
 
 
 if __name__ == "__main__":
@@ -348,6 +392,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
     parser.add_argument("--frames",default=150,type=int)
     parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--trajectory_only", action="store_true")
     args = get_combined_args(parser)
 
     if args.configs:
@@ -361,4 +406,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, args.frames)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, args.frames, args.trajectory_only)

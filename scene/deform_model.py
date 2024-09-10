@@ -96,11 +96,13 @@ class DeformModelTORCHODE:
                 param_group['lr'] = lr
                 return lr
 class DeformModelODE:
-    def __init__(self, is_blender=False, is_6dof=False, D = 8, W = 256, input_ch = 3, output_ch = 59, multires = 10, scale_lr = False):
-        self.deform = DeformNetworkODE(is_blender=is_blender, is_6dof=is_6dof, D = D, W = W, input_ch = input_ch, output_ch = output_ch, multires = multires).cuda()
+    def __init__(self, is_blender=False, is_6dof=False, D = 8, W = 256, input_ch = 3, output_ch = 59, multires = 10, scale_lr = False, use_linear=False, rtol = 0.001, atol = 0.0001):
+        self.deform = DeformNetworkODE(is_blender=is_blender, is_6dof=is_6dof, D = D, W = W, input_ch = input_ch, output_ch = output_ch, multires = multires, use_linear=use_linear).cuda()
         self.optimizer = None
         self.spatial_lr_scale = 5
         self.scale_lr = scale_lr
+        self.rtol = rtol
+        self.atol = atol
 
     def step(self, xyz, time_emb):  
         # xyz: N x 3
@@ -113,8 +115,6 @@ class DeformModelODE:
         zero_start = time_emb[0] == 0
         if zero_start.item() and is_val:
             return [xyz] , [torch.zeros([xyz.shape[0], 4]).to(xyz.device)], [torch.zeros([xyz.shape[0],3]).to(xyz.device)]
-        rtol = 0.001
-        atol = 0.0001
         if not zero_start:
             time_emb = [0.0] + time_emb
 
@@ -123,7 +123,7 @@ class DeformModelODE:
         #ode_value = odeint_adjoint(self.deform, xyz,t_interval, rtol= rtol, atol=atol,method='rk4', options={'step_size': 0.0025})
         # check if t_interval is strictly increasing
   
-        ode_value = odeint_adjoint(self.deform, xyz,t_interval, rtol= rtol, atol=atol)
+        ode_value = odeint_adjoint(self.deform, xyz,t_interval, rtol= self.rtol, atol=self.atol)
         xyz_new = torch.squeeze(ode_value)
         #print(xyz_new.shape)
         if is_val:

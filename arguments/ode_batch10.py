@@ -2,15 +2,18 @@ ModelParams = dict(
     is_ode = True,
     D = 8,
     W = 256,
-    max_gaussians = 10000
+    max_gaussians = 10000,
+    use_linear = True,
 )
 
 OptimizationParams = dict(
     scale_lr = False,
     direct_compute = True,
     sequence_length = 30,
-    num_cams_per_iter = 1,
+    num_cams_per_iter = 30,
     spread_out_sequence = True,
     position_lr_init = 0.0001,
     position_lr_final = 0.0000001,
+    rtol = 1e-3,
+    atol = 1e-4,
 )
