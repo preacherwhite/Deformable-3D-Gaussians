@@ -50,7 +50,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     gaussians = GaussianModel(dataset.sh_degree)
     if dataset.is_ode:
         print("Using ODE for deformation")
-        deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr, use_linear=dataset.use_linear, rtol=opt.rtol, atol=opt.atol) 
+        deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch,
+                                 multires=dataset.multires, scale_lr = opt.scale_lr, use_linear=dataset.use_linear, use_emb=dataset.use_emb, rtol=opt.rtol, atol=opt.atol, output_scale = dataset.output_scale) 
     else:
         print("Using DeformModel")
         deform = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)

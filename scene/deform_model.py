@@ -96,8 +96,10 @@ class DeformModelTORCHODE:
                 param_group['lr'] = lr
                 return lr
 class DeformModelODE:
-    def __init__(self, is_blender=False, is_6dof=False, D = 8, W = 256, input_ch = 3, output_ch = 59, multires = 10, scale_lr = False, use_linear=False, rtol = 0.001, atol = 0.0001):
-        self.deform = DeformNetworkODE(is_blender=is_blender, is_6dof=is_6dof, D = D, W = W, input_ch = input_ch, output_ch = output_ch, multires = multires, use_linear=use_linear).cuda()
+    def __init__(self, is_blender=False, is_6dof=False, D = 8, W = 256, input_ch = 3, output_ch = 59, multires = 10, 
+                 scale_lr = False, use_linear=0, use_emb=True, rtol = 0.001, atol = 0.0001, output_scale = 1):
+        self.deform = DeformNetworkODE(is_blender=is_blender, is_6dof=is_6dof, D = D, W = W, input_ch = input_ch, output_ch = output_ch, 
+                                       multires = multires, use_linear=use_linear, use_emb=use_emb, output_scale=output_scale).cuda()
         self.optimizer = None
         self.spatial_lr_scale = 5
         self.scale_lr = scale_lr

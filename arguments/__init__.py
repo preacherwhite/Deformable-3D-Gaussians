@@ -67,7 +67,9 @@ class ModelParams(ParamGroup):
         self.input_ch = 3
         self.output_ch = 59
         self.multires = 10
-        self.use_linear = False
+        self.use_linear = 0
+        self.use_emb = True
+        self.output_scale = 1
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

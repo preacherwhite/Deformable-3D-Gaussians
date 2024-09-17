@@ -43,7 +43,7 @@ if __name__ == "__main__":
     pp_args = pp.extract(args)
     original_model_path = lp_args.model_path
     # Run training for different sequence lengths
-    sequence_lengths = [10, 20, 30, 40, 50,60]
+    sequence_lengths = [30, 40, 50,60]
     for seq_length in sequence_lengths:
         print(f"\nTraining with sequence length: {seq_length}")
         

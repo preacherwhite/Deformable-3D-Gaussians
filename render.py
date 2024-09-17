@@ -348,7 +348,7 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         if dataset.is_ode:  
-            deform =  DeformModelODE(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires, use_linear=dataset.use_linear)
+            deform =  DeformModelODE(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires, use_linear=dataset.use_linear, use_emb=dataset.use_emb)
         else:
             deform = DeformModel(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires)
         deform.load_weights(dataset.model_path)
