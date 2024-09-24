@@ -97,6 +97,10 @@ class OptimizationParams(ParamGroup):
         self.freeze_gaussians = False
         self.rtol = 1e-3    
         self.atol = 1e-4
+        self.use_iterative_update = False
+        self.iterative_update_decay = 0.9
+        self.iterative_update_interval = 1000
+        self.max_training_switches  = 5
 
         self.iterations = 40_000
         self.warm_up = 3_000

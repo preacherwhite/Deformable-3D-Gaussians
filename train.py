@@ -40,10 +40,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     opt.position_lr_max_steps = round((opt.position_lr_max_steps - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
     opt.densify_until_iter = round((opt.densify_until_iter - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
 
+    opt.use_iterative_update = getattr(opt, 'use_iterative_update', False)
+    opt.iterative_update_decay = getattr(opt, 'iterative_update_decay', 0.9)
+    opt.iterative_update_interval = getattr(opt, 'iterative_update_interval', 1000)
+    opt.max_training_switches = getattr(opt, 'max_training_switches', 6)
+
     print("Training for {} iterations".format(opt.iterations))
     print("Densifying until iteration {}".format(opt.densify_until_iter))
     print("Position learning rate max steps: {}".format(opt.position_lr_max_steps))
     print("Deform learning rate max steps: {}".format(opt.deform_lr_max_steps))
+    print(f"Max training switches before simultaneous optimization: {opt.max_training_switches}")
 
     #start training
     tb_writer = prepare_output_and_logger(dataset)
@@ -55,6 +61,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     else:
         print("Using DeformModel")
         deform = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
+    if opt.use_iterative_update:
+        print("Using iterative update with decay factor: {}".format(opt.iterative_update_decay))
+        print("Iterative update interval: {} iterations".format(opt.iterative_update_interval))
     deform.train_setting(opt)
 
     scene = Scene(dataset, gaussians)
@@ -82,6 +91,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     saving_iterations = [opt.warm_up + ((it - opt.warm_up)  // batch_size) for it in saving_iterations]
     saving_iterations.append(iterations)
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
+
+    update_gaussians = True
+    update_deform = True
+    next_switch_iteration = opt.warm_up + opt.iterative_update_interval
+    current_interval = opt.iterative_update_interval
+    switch_count = 0
+    simultaneous_optimization = False
     for iteration in range(1, (iterations) + 1):
         iter_start.record()
 
@@ -216,23 +232,35 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
             # Optimizer step
             if iteration < opt.iterations:
-                if opt.freeze_gaussians:
-                    if iteration < opt.warm_up:
+                if opt.use_iterative_update and iteration >= opt.warm_up and not simultaneous_optimization:
+                    if iteration >= next_switch_iteration:
+                        update_gaussians = not update_gaussians
+                        update_deform = not update_deform
+                        current_interval = max(int(current_interval * opt.iterative_update_decay), 5)
+                        next_switch_iteration = iteration + current_interval
+                        switch_count += 1
+                        print(f"Switching update mode at iteration {iteration}. Next switch at {next_switch_iteration}")
+                        
+                        if switch_count >= opt.max_training_switches or current_interval <= 5:
+                            simultaneous_optimization = True
+                            print(f"Reached {opt.max_training_switches} switches. Switching to simultaneous optimization.")
+
+                    if update_gaussians:
                         gaussians.optimizer.step()
                         gaussians.update_learning_rate(iteration)
-                        gaussians.optimizer.zero_grad(set_to_none=True)
-
-                    else:
+                    if update_deform:
                         deform.optimizer.step()
-                        deform.optimizer.zero_grad()
                         deform.update_learning_rate(iteration)
                 else:
+                    # Simultaneous optimization or original update logic
                     gaussians.optimizer.step()
                     gaussians.update_learning_rate(iteration)
                     deform.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none=True)
-                    deform.optimizer.zero_grad()
                     deform.update_learning_rate(iteration)
+
+                # Zero gradients
+                gaussians.optimizer.zero_grad(set_to_none=True)
+                deform.optimizer.zero_grad()
 
 
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
