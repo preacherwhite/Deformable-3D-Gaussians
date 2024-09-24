@@ -47,8 +47,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
 
     #start training
     tb_writer = prepare_output_and_logger(dataset)
+    #gaussians = GaussianModel(dataset.sh_degree)
     gaussians = GaussianModel(dataset.sh_degree)
-    gaussians_baseline = GaussianModel(dataset.sh_degree)
     
     print("Using ODE for deformation")
     deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
@@ -57,11 +57,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     deform.train_setting(opt)
     deform_baseline.train_setting(opt)
 
-    scene = Scene(dataset, gaussians)
     dataset_baseline = dataset
     dataset_baseline.model_path = base_model_path
 
-    scene_baseline = Scene(dataset_baseline, gaussians_baseline, load_iteration=-1, shuffle=False)
+    scene = Scene(dataset_baseline, gaussians, load_iteration=-1, shuffle=False)
     gaussians.training_setup(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -157,9 +156,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
             if (d_xyz == 0.0):
                 loss += 0.0
             else:
-                Ll1 += l1_loss(d_xyz, d_xyz_baseline)
-                Ll1 += l1_loss(d_rotation, d_rotation_baseline)
-                Ll1 += l1_loss(d_scaling, d_scaling_baseline)
+                gau_mean = gaussians.get_xyz
+                Ll1 += l1_loss(d_xyz, d_xyz_baseline+gau_mean)
+                Ll1 += l1_loss(d_rotation, d_rotation_baseline+gau_mean)
+                Ll1 += l1_loss(d_scaling, d_scaling_baseline+gau_mean)
             # accumulate loss for each viewpoint
                 loss += Ll1 
             
@@ -185,9 +185,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
         iter_end.record()
         loss /= len(sampled_cams)
         Ll1 /= len(sampled_cams)
-        loss += l1_loss(gaussians.get_xyz, gaussians_baseline.get_xyz)
-        loss += l1_loss(gaussians.get_scaling, gaussians_baseline.get_scaling)
-        loss += l1_loss(gaussians.get_rotation, gaussians_baseline.get_rotation)
         loss.backward()
         
         for viewpoint_cam in sampled_cams:
