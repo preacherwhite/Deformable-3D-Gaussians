@@ -27,7 +27,7 @@ import time
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, is_ode, trajectory_only):
+def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform, is_ode, trajectory_only,gau_index,deform_reference, k):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
@@ -36,47 +36,95 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
     makedirs(gts_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
 
-    # New code for trajectory visualization
-    k = 100  # Number of Gaussians to sample
     n_frames = len(views)
     
     # Randomly sample k Gaussians
     n_gaussians = gaussians.get_xyz.shape[0]
-    sampled_indices = np.random.choice(n_gaussians, k, replace=False)
-    
+
+    if gau_index != -1:
+        # If gau_index is specified, add it to the beginning of sampled_indices
+        sampled_indices = [gau_index] + list(np.random.choice(n_gaussians, k-1, replace=False))
+        sampled_indices = np.unique(sampled_indices)  # Remove duplicates if gau_index was already in the random selection
+    else:
+        sampled_indices = np.random.choice(n_gaussians, k, replace=False)
     # Initialize arrays to store trajectories
     trajectories = np.zeros((k, n_frames, 3))
-    
+    trajectories_ref = np.zeros((k, n_frames, 3))
     # Collect trajectory data
     for frame, view in enumerate(tqdm(views, desc="Collecting trajectory data")):
         fid = view.fid
         xyz = gaussians.get_xyz
         d_xyz, _, _ = deform.step(xyz.detach(), [fid])
-        
+        if deform_reference is not None:
+            d_xyz_ref, _, _ = deform_reference.step(xyz.detach(), [fid])
+            trajectories_ref[:, frame, :] = (xyz[sampled_indices] + d_xyz_ref[0][sampled_indices]).cpu().numpy()
         # Store the positions of sampled Gaussians
         if is_ode:
             trajectories[:, frame, :] = (d_xyz[0][sampled_indices]).cpu().numpy()
         else:
             trajectories[:, frame, :] = (xyz[sampled_indices] + d_xyz[0][sampled_indices]).cpu().numpy()
-    
+        
     # Visualize trajectories
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(111, projection='3d')
     
-    for i in range(k):
-        ax.plot(trajectories[i, :, 0], trajectories[i, :, 1], trajectories[i, :, 2], label=f'Gaussian {i+1}')
+    # Define colors
+    special_color = 'red'  # Color for the specified Gaussian
+    other_color = 'blue'   # Color for other Gaussians
+    
+    for i in range(len(sampled_indices)):
+        if i == 0 and gau_index != -1:
+            # Plot the specified Gaussian with a special color
+            ax.plot(trajectories[i, :, 0], trajectories[i, :, 1], trajectories[i, :, 2], 
+                    color=special_color, linewidth=2, label=f'Gaussian {gau_index}')
+        else:
+            # Plot other Gaussians with the same color
+            ax.plot(trajectories[i, :, 0], trajectories[i, :, 1], trajectories[i, :, 2], 
+                    color=other_color, alpha=0.5)
     
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
-    ax.legend()
-    plt.title(f'3D Trajectories of {k} Sampled Gaussians')
+    if gau_index != -1:
+        ax.legend()
+    plt.title(f'3D Trajectories of {len(sampled_indices)} Sampled Gaussians')
     
     # Save the plot
-    trajectory_path = os.path.join(model_path, name, f"ours_{iteration}", "trajectories")
+    trajectory_path = os.path.join(model_path, name, f"ours_{iteration}", f"trajectories_{k}")
     makedirs(trajectory_path, exist_ok=True)
     plt.savefig(os.path.join(trajectory_path, 'gaussian_trajectories.png'))
     plt.close()
+
+    if deform_reference is not None:
+        #also plot the reference trajectory
+        # Visualize trajectories
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Define colors
+        special_color = 'red'  # Color for the specified Gaussian
+        other_color = 'blue'   # Color for other Gaussians
+        
+        for i in range(len(sampled_indices)):
+            if i == 0 and gau_index != -1:
+                # Plot the specified Gaussian with a special color
+                ax.plot(trajectories_ref[i, :, 0], trajectories_ref[i, :, 1], trajectories_ref[i, :, 2], 
+                        color=special_color, linewidth=2, label=f'Gaussian {gau_index}')
+            else:
+                # Plot other Gaussians with the same color
+                ax.plot(trajectories_ref[i, :, 0], trajectories_ref[i, :, 1], trajectories_ref[i, :, 2], 
+                        color=other_color, alpha=0.5)
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        if gau_index != -1:
+            ax.legend()
+        plt.title(f'3D Trajectories of {len(sampled_indices)} Sampled Gaussians for reference')
+        
+        plt.savefig(os.path.join(trajectory_path, 'gaussian_trajectories_reference.png'))
+        plt.close()
+
     if trajectory_only:
         return
     t_list = []
@@ -343,9 +391,10 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, it
 
 
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
-                mode: str, frames: int, trajectory_only: bool):
+                mode: str, frames: int, trajectory_only: bool, gau_index: int, reference_deform_path: str, k: int):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
+        print("attempting to load gaussians from iteration {}".format(iteration))
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         if dataset.is_ode:  
             deform =  DeformModelODE(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires, use_linear=dataset.use_linear, use_emb=dataset.use_emb)
@@ -353,6 +402,11 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
             deform = DeformModel(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires)
         deform.load_weights(dataset.model_path)
 
+        if reference_deform_path != "":
+            deform_refernece = DeformModel(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires)
+            deform_refernece.load_weights(reference_deform_path)
+        else:
+            deform_refernece = None
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -372,12 +426,12 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         if not skip_train:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
                         scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform, dataset.is_ode, trajectory_only)
+                        background, deform, dataset.is_ode, trajectory_only,gau_index, deform_refernece, k)
 
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform, dataset.is_ode, trajectory_only)
+                        background, deform, dataset.is_ode, trajectory_only,gau_index, deform_refernece, k)
 
 
 if __name__ == "__main__":
@@ -393,6 +447,9 @@ if __name__ == "__main__":
     parser.add_argument("--frames",default=150,type=int)
     parser.add_argument("--configs", type=str, default = "")
     parser.add_argument("--trajectory_only", action="store_true")
+    parser.add_argument("--gau_index", type=int, default=-1)
+    parser.add_argument("--reference_deform_path", type=str, default="")
+    parser.add_argument("--k", type=int, default=100)
     args = get_combined_args(parser)
 
     if args.configs:
@@ -406,4 +463,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, args.frames, args.trajectory_only)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, args.frames, args.trajectory_only,args.gau_index, args.reference_deform_path, args.k)

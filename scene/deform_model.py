@@ -164,6 +164,7 @@ class DeformModelODE:
     def save_weights(self, model_path, iteration):
         out_weights_path = os.path.join(model_path, "deform/iteration_{}".format(iteration))
         os.makedirs(out_weights_path, exist_ok=True)
+        print("saving weights to ", out_weights_path)
         torch.save(self.deform.state_dict(), os.path.join(out_weights_path, 'deform.pth'))
 
     def load_weights(self, model_path, iteration=-1):

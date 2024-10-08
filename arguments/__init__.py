@@ -61,7 +61,7 @@ class ModelParams(ParamGroup):
         self.load2gpu_on_the_fly = False
         self.is_blender = False
         self.is_6dof = False
-        self.max_gaussians = 10000
+        self.max_gaussians = 500000
         self.D = 8
         self.W = 256
         self.input_ch = 3

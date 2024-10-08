@@ -32,9 +32,10 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_model_path):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_model_path,gau_index):
     # tune parameters to fit in different sequence lengths
     full_iteration = opt.iterations
+    opt.warm_up = 0
     opt.iterations = round((full_iteration - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
     opt.deform_lr_max_steps = opt.iterations
     opt.position_lr_max_steps = round((opt.position_lr_max_steps - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
@@ -51,18 +52,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     gaussians = GaussianModel(dataset.sh_degree)
     
     print("Using ODE for deformation")
-    deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
+    deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
     print("Using DeformModel")
-    deform_baseline = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
+    deform_baseline = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
     deform.train_setting(opt)
-    deform_baseline.train_setting(opt)
 
-    dataset_baseline = dataset
-    dataset_baseline.model_path = base_model_path
+    temp_model_path = dataset.model_path
+    dataset.model_path = base_model_path
 
-    scene = Scene(dataset_baseline, gaussians, load_iteration=-1, shuffle=False)
-    gaussians.training_setup(opt)
-
+    scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False)
+    dataset.model_path = temp_model_path
+    scene.model_path = temp_model_path
+    #gaussians.training_setup(opt)
+    
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -84,7 +86,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     
     saving_iterations = [opt.warm_up + ((it - opt.warm_up)  // batch_size) for it in saving_iterations]
     
-    smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
+    #smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
+
+
+    print("\n[ITER {}] Saving Gaussians".format(0))
+    scene.save(0)
+    deform.save_weights(dataset.model_path, 0)
+    
     for iteration in range(1, (iterations) + 1):
         iter_start.record()
 
@@ -93,59 +101,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack or iteration == opt.warm_up:
+        if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
-            if iteration >= opt.warm_up:
-                # Sort the viewpoints by fid
-                viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
-                
-                # Calculate the total number of viewpoints
-                total_viewpoints = len(viewpoint_stack)
-                
-                # Calculate the step size for uniform distribution
-                step = (total_viewpoints - 1) / (opt.sequence_length - 1)
-                
-                # Select uniformly spread out viewpoints
-                if opt.spread_out_sequence:
-                    selected_indices = [int(round(i * step)) for i in range(opt.sequence_length)]
-                    viewpoint_stack = [viewpoint_stack[i] for i in selected_indices]
-                else:
-                    viewpoint_stack = viewpoint_stack[:opt.sequence_length]
+            # Sort the viewpoints by fid
+            viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
+            
+            # Calculate the total number of viewpoints
+            total_viewpoints = len(viewpoint_stack)
+            
+            # Calculate the step size for uniform distribution
+            step = (total_viewpoints - 1) / (opt.sequence_length - 1)
+            
+            # Select uniformly spread out viewpoints
+            if opt.spread_out_sequence:
+                selected_indices = [int(round(i * step)) for i in range(opt.sequence_length)]
+                viewpoint_stack = [viewpoint_stack[i] for i in selected_indices]
+            else:
+                viewpoint_stack = viewpoint_stack[:opt.sequence_length]
 
         total_frame = len(viewpoint_stack)
 
         k = min(opt.num_cams_per_iter, len(viewpoint_stack))
-        if iteration < opt.warm_up:
-            sampled_indices = random.sample(range(len(viewpoint_stack)), 1)
-            sampled_indices.sort()
-            sampled_cams =  [viewpoint_stack[i] for i in sampled_indices]
-            viewpoint_stack = [cam for i, cam in enumerate(viewpoint_stack) if i not in sampled_indices]
-            d_xyz_list = [0.0 for _ in sampled_cams]
-            d_rotation_list = [0.0 for _ in sampled_cams]
-            d_scaling_list = [0.0 for _ in sampled_cams]
-            d_xyz_list_baseline = [0.0 for _ in sampled_cams]
-            d_rotation_list_baseline = [0.0 for _ in sampled_cams]
-            d_scaling_list_baseline = [0.0 for _ in sampled_cams]
+        sampled_indices = random.sample(range(len(viewpoint_stack)), k)
+        sampled_indices.sort()  # Sort to maintain temporal order
+        sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
+        # Remove the sampled cameras from the stack
+        viewpoint_stack = [cam for i, cam in enumerate(viewpoint_stack) if i not in sampled_indices]
+        sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
+
+
+        if gau_index != -1:
+            # Select only one Gaussian if train_single_gaussian is True
+            if iteration == 1: 
+                print(f"Training on single Gaussian at index: {gau_index}")
+            with torch.no_grad():
+                d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz[gau_index:gau_index+1], sampled_fids)
+            d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz[gau_index:gau_index+1], sampled_fids)
         else:
-            sampled_indices = random.sample(range(len(viewpoint_stack)), k)
-            sampled_indices.sort()  # Sort to maintain temporal order
-            sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
-            # Remove the sampled cameras from the stack
-            viewpoint_stack = [cam for i, cam in enumerate(viewpoint_stack) if i not in sampled_indices]
-            sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
-            
-            # N = gaussians.get_xyz.shape[0]
-            # time_input = fid.unsqueeze(0).expand(N, -1)
-
-            ast_noise = 0 #if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * smooth_term(iteration)
-
-            # Deform is called to calculate gaussian parameters at time t according to the current viewpoint camera. We need to change this so 
-            # A series of t from a series of viewpoints are used to calculate the gaussian parameters at different time frames
-            d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz.detach(), sampled_fids)
-            d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
+            # Original behavior for all Gaussians
+            with torch.no_grad():
+                d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz, sampled_fids)
+            d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz, sampled_fids)
         
         loss = 0.0
-        Ll1 = 0.0
         visibility_filter_list = []
         render_pkg_re_list = []
         assert len(sampled_cams) == len(d_xyz_list)
@@ -153,38 +151,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
             if dataset.load2gpu_on_the_fly:
                 viewpoint_cam.load2device()
             fid = viewpoint_cam.fid
-            if (d_xyz == 0.0):
-                loss += 0.0
+            if gau_index != -1:
+                gau_mean = gaussians.get_xyz[gau_index:gau_index+1]
             else:
                 gau_mean = gaussians.get_xyz
-                Ll1 += l1_loss(d_xyz, d_xyz_baseline+gau_mean)
-                Ll1 += l1_loss(d_rotation, d_rotation_baseline+gau_mean)
-                Ll1 += l1_loss(d_scaling, d_scaling_baseline+gau_mean)
-            # accumulate loss for each viewpoint
-                loss += Ll1 
-            
-            if iteration < opt.warm_up: 
-                render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof)
-            else:
-                render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling, dataset.is_6dof, direct_compute = opt.direct_compute)
-
-            image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
-                "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
-            # Keep track of max radii in image-space for pruning
-            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
-                                                                radii[visibility_filter])
-            visibility_filter_list.append(visibility_filter)
-            render_pkg_re_list.append(render_pkg_re)
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 += l1_loss(image, gt_image)
-            # accumulate loss for each viewpoint
-            loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+            loss += l1_loss(d_xyz, d_xyz_baseline.detach()+gau_mean)
 
                 
             
         iter_end.record()
         loss /= len(sampled_cams)
-        Ll1 /= len(sampled_cams)
         loss.backward()
         
         for viewpoint_cam in sampled_cams:
@@ -201,52 +177,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
                 progress_bar.close()
 
             # Log and save
-            cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
-                                       testing_iterations, scene, render, (pipe, background), deform,
-                                       dataset.load2gpu_on_the_fly, dataset.is_6dof, seq_length=opt.sequence_length, is_ode=dataset.is_ode)
-            if iteration in testing_iterations:
-                if cur_psnr.item() > best_psnr:
-                    best_psnr = cur_psnr.item()
-                    best_iteration = iteration
+            if gau_index == -1:
+                cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
+                                        testing_iterations, scene, render, (pipe, background), deform,
+                                        dataset.load2gpu_on_the_fly, dataset.is_6dof, seq_length=opt.sequence_length, is_ode=dataset.is_ode)
+                if iteration in testing_iterations:
+                    if cur_psnr.item() > best_psnr:
+                        best_psnr = cur_psnr.item()
+                        best_iteration = iteration
 
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 deform.save_weights(dataset.model_path, iteration)
 
-            # Densification
-            if iteration < opt.densify_until_iter:
-                for visibility_filter, render_pkg_re in zip(visibility_filter_list, render_pkg_re_list):
-                    viewspace_point_tensor_densify = render_pkg_re["viewspace_points_densify"]
-                    gaussians.add_densification_stats(viewspace_point_tensor_densify, visibility_filter)
-
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-
-                if iteration % opt.opacity_reset_interval == 0 or (
-                        dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
-
             # Optimizer step
             if iteration < opt.iterations:
-                if opt.freeze_gaussians:
-                    if iteration < opt.warm_up:
-                        gaussians.optimizer.step()
-                        gaussians.update_learning_rate(iteration)
-                        gaussians.optimizer.zero_grad(set_to_none=True)
-
-                    else:
-                        deform.optimizer.step()
-                        deform.optimizer.zero_grad()
-                        deform.update_learning_rate(iteration)
-                else:
-                    gaussians.optimizer.step()
-                    gaussians.update_learning_rate(iteration)
-                    deform.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none=True)
-                    deform.optimizer.zero_grad()
-                    deform.update_learning_rate(iteration)
+                deform.optimizer.step()
+                deform.optimizer.zero_grad()
+                deform.update_learning_rate(iteration)
 
 
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
@@ -345,11 +294,12 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[7000, 8000, 9000] + list(range(10000, 40001, 1000)))
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 7_000, 10_000, 20_000, 30_000, 40000])
+                        default=[700, 800, 900] + list(range(10000, 40001, 1000)))
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=list(range(1, 501, 100)))
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--base_model_path", type=str, default="")
     parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--gau_index", type=int, default = -1)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.configs:
@@ -365,7 +315,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.base_model_path)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.base_model_path, args.gau_index)
 
     # All done
     print("\nTraining complete.")
