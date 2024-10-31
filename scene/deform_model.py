@@ -41,7 +41,7 @@ class DeformModelTORCHODE:
         solver = to.AutoDiffAdjoint(step_method, step_size_controller)
         jit_solver = torch.compile(solver)
         sol = jit_solver.solve(to.InitialValueProblem(y0=xyz, t_eval=t_interval.repeat((xyz.shape[0],1))))
-        xyz_new = torch.squeeze(sol.ys).transpose(0,1)
+        xyz_new = torch.squeeze(sol.ys)
         #print(xyz_new.shape)
         if is_val:
             if not zero_start:
@@ -97,9 +97,9 @@ class DeformModelTORCHODE:
                 return lr
 class DeformModelODE:
     def __init__(self, is_blender=False, is_6dof=False, D = 8, W = 256, input_ch = 3, output_ch = 59, multires = 10, 
-                 scale_lr = False, use_linear=0, use_emb=True, rtol = 0.001, atol = 0.0001, output_scale = 1):
+                 scale_lr = False, use_linear=0, use_emb=True, rtol = 0.001, atol = 0.0001, output_scale = 1, skips = [4]):
         self.deform = DeformNetworkODE(is_blender=is_blender, is_6dof=is_6dof, D = D, W = W, input_ch = input_ch, output_ch = output_ch, 
-                                       multires = multires, use_linear=use_linear, use_emb=use_emb, output_scale=output_scale).cuda()
+                                       multires = multires, use_linear=use_linear, use_emb=use_emb, output_scale=output_scale, skips=skips).cuda()
         self.optimizer = None
         self.spatial_lr_scale = 5
         self.scale_lr = scale_lr
@@ -117,8 +117,8 @@ class DeformModelODE:
         zero_start = time_emb[0] == 0
         if zero_start.item() and is_val:
             return [xyz] , [torch.zeros([xyz.shape[0], 4]).to(xyz.device)], [torch.zeros([xyz.shape[0],3]).to(xyz.device)]
-        if not zero_start:
-            time_emb = [0.0] + time_emb
+        # if not zero_start:
+        #     time_emb = [0.0] + time_emb
 
         t_interval = torch.Tensor(time_emb).to(xyz.device)
         #print('t_interval=', t_interval.shape, 'xyz=', xyz.shape)

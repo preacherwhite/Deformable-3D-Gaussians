@@ -12,10 +12,10 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, kl_divergence
+from utils.loss_utils import l1_loss, ssim, kl_divergence, l2_loss
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel, DeformModel, DeformModelODE
+from scene import Scene, GaussianModel, DeformModel, DeformModelODE, DeformModelTORCHODE
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
@@ -24,6 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import random
 import numpy as np
+import time
 try:
     from torch.utils.tensorboard import SummaryWriter
 
@@ -52,7 +53,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     gaussians = GaussianModel(dataset.sh_degree)
     
     print("Using ODE for deformation")
-    deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
+    if dataset.use_torch_ode:
+        deform = DeformModelTORCHODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
+    elif dataset.is_ode:
+        deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, use_emb=dataset.use_emb, skips = None)
+    else:
+        deform = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
     print("Using DeformModel")
     deform_baseline = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
     deform.train_setting(opt)
@@ -71,7 +77,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
 
-    viewpoint_stack = None
+    viewpoint_stack = scene.getTrainCameras()
     ema_loss_for_log = 0.0
     best_psnr = 0.0
     best_iteration = 0
@@ -93,79 +99,65 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     scene.save(0)
     deform.save_weights(dataset.model_path, 0)
     
+        # get the min and max fid for all cameras
+    min_fid = min([viewpoint_cam.fid for viewpoint_cam in viewpoint_stack])
+    max_fid = max([viewpoint_cam.fid for viewpoint_cam in viewpoint_stack])
+
     for iteration in range(1, (iterations) + 1):
+        
         iter_start.record()
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            # Sort the viewpoints by fid
-            viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
-            
-            # Calculate the total number of viewpoints
-            total_viewpoints = len(viewpoint_stack)
-            
-            # Calculate the step size for uniform distribution
-            step = (total_viewpoints - 1) / (opt.sequence_length - 1)
-            
-            # Select uniformly spread out viewpoints
-            if opt.spread_out_sequence:
-                selected_indices = [int(round(i * step)) for i in range(opt.sequence_length)]
-                viewpoint_stack = [viewpoint_stack[i] for i in selected_indices]
-            else:
-                viewpoint_stack = viewpoint_stack[:opt.sequence_length]
+        # Randomly sample values of fid (float) witin the range of min_fid and max_fid
+        # sampled_fids = [random.uniform(min_fid, max_fid) for _ in range(batch_size)]
+        # sampled_fids.sort()
 
-        total_frame = len(viewpoint_stack)
-
-        k = min(opt.num_cams_per_iter, len(viewpoint_stack))
-        sampled_indices = random.sample(range(len(viewpoint_stack)), k)
-        sampled_indices.sort()  # Sort to maintain temporal order
-        sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
-        # Remove the sampled cameras from the stack
-        viewpoint_stack = [cam for i, cam in enumerate(viewpoint_stack) if i not in sampled_indices]
-        sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
-
-
+        sampled_fids = torch.linspace(min_fid.item(), max_fid.item(), steps=batch_size, device="cuda")
+        
         if gau_index != -1:
             # Select only one Gaussian if train_single_gaussian is True
             if iteration == 1: 
                 print(f"Training on single Gaussian at index: {gau_index}")
+            
+            d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz[gau_index:gau_index+1], sampled_fids)   
+
             with torch.no_grad():
-                d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz[gau_index:gau_index+1], sampled_fids)
-            d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz[gau_index:gau_index+1], sampled_fids)
+                d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz[gau_index:gau_index+1], sampled_fids)
+
         else:
             # Original behavior for all Gaussians
+            d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz, sampled_fids)
             with torch.no_grad():
-                d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz, sampled_fids)
-            d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz, sampled_fids)
+                d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline = deform_baseline.step(gaussians.get_xyz, sampled_fids)
         
         loss = 0.0
-        visibility_filter_list = []
-        render_pkg_re_list = []
-        assert len(sampled_cams) == len(d_xyz_list)
-        for viewpoint_cam, d_xyz, d_rotation, d_scaling, d_xyz_baseline, d_rotation_baseline, d_scaling_baseline in zip(sampled_cams, d_xyz_list, d_rotation_list, d_scaling_list, d_xyz_list_baseline, d_rotation_list_baseline, d_scaling_list_baseline):
-            if dataset.load2gpu_on_the_fly:
-                viewpoint_cam.load2device()
-            fid = viewpoint_cam.fid
-            if gau_index != -1:
-                gau_mean = gaussians.get_xyz[gau_index:gau_index+1]
-            else:
-                gau_mean = gaussians.get_xyz
-            loss += l1_loss(d_xyz, d_xyz_baseline.detach()+gau_mean)
 
-                
-            
-        iter_end.record()
-        loss /= len(sampled_cams)
-        loss.backward()
+        if gau_index != -1:
+            gau_mean = gaussians.get_xyz[gau_index:gau_index+1]
+        else:
+            gau_mean = gaussians.get_xyz
+
+
+        d_xyz_baseline = torch.stack(d_xyz_list_baseline, dim=0)
         
-        for viewpoint_cam in sampled_cams:
-            if dataset.load2gpu_on_the_fly:
-                viewpoint_cam.load2device('cpu')
+        if dataset.is_ode:
+            extended_gau_mean = gau_mean.repeat(d_xyz_list.shape[0], 1, 1)
+            loss = l1_loss( d_xyz_list,d_xyz_baseline.detach().clone() + extended_gau_mean)
+        else:
+            d_xyz_list = torch.stack(d_xyz_list, dim=0)
+            extended_gau_mean = gau_mean.repeat(d_xyz_list.shape[0], 1, 1)
+            loss = l1_loss( d_xyz_list+ extended_gau_mean ,d_xyz_baseline.detach().clone() + extended_gau_mean)
+
+        loss.backward()
+        # Optimizer step
+        deform.optimizer.step()
+        deform.optimizer.zero_grad()
+        deform.update_learning_rate(iteration)
+
+        iter_end.record()
 
         with torch.no_grad():
             # Progress bar
@@ -177,25 +169,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
                 progress_bar.close()
 
             # Log and save
-            if gau_index == -1:
-                cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
-                                        testing_iterations, scene, render, (pipe, background), deform,
-                                        dataset.load2gpu_on_the_fly, dataset.is_6dof, seq_length=opt.sequence_length, is_ode=dataset.is_ode)
-                if iteration in testing_iterations:
-                    if cur_psnr.item() > best_psnr:
-                        best_psnr = cur_psnr.item()
-                        best_iteration = iteration
+            
+            cur_psnr = training_report(tb_writer, iteration, loss, loss, l2_loss, iter_start.elapsed_time(iter_end),
+                                    testing_iterations, scene, render, (pipe, background), deform,
+                                    dataset.load2gpu_on_the_fly, dataset.is_6dof, seq_length=opt.sequence_length, is_ode=dataset.is_ode)
+            if iteration in testing_iterations:
+                if cur_psnr.item() > best_psnr:
+                    best_psnr = cur_psnr.item()
+                    best_iteration = iteration
 
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 deform.save_weights(dataset.model_path, iteration)
-
-            # Optimizer step
-            if iteration < opt.iterations:
-                deform.optimizer.step()
-                deform.optimizer.zero_grad()
-                deform.update_learning_rate(iteration)
 
 
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
@@ -294,19 +280,22 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[700, 800, 900] + list(range(10000, 40001, 1000)))
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=list(range(1, 501, 100)))
+                        default=list(range(1000, 150001, 2000)))
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=list(range(1000, 150001, 2000)))
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--base_model_path", type=str, default="")
     parser.add_argument("--configs", type=str, default = "")
     parser.add_argument("--gau_index", type=int, default = -1)
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
+ 
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+
+    print("also saving at itration :{}".format(args.iterations))
+    args.save_iterations.append(args.iterations)
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

@@ -18,17 +18,14 @@ from math import exp
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
 
+def l2_loss(network_output, gt):
+    return ((network_output - gt) ** 2).mean()
 
 def kl_divergence(rho, rho_hat):
     rho_hat = torch.mean(torch.sigmoid(rho_hat), 0)
     rho = torch.tensor([rho] * len(rho_hat)).cuda()
     return torch.mean(
         rho * torch.log(rho / (rho_hat + 1e-5)) + (1 - rho) * torch.log((1 - rho) / (1 - rho_hat + 1e-5)))
-
-
-def l2_loss(network_output, gt):
-    return ((network_output - gt) ** 2).mean()
-
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])

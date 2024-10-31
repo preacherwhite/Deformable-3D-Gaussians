@@ -70,6 +70,7 @@ class ModelParams(ParamGroup):
         self.use_linear = 0
         self.use_emb = True
         self.output_scale = 1
+        self.use_torch_ode = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

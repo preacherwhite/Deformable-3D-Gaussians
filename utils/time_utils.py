@@ -134,14 +134,14 @@ class DeformNetwork(nn.Module):
         return d_xyz , rotation, scaling
 
 class DeformNetworkODE(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False, use_linear=0, use_emb=True, output_scale = 1):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False, use_linear=0, use_emb=True, output_scale=1, skips=[4]):
         super(DeformNetworkODE, self).__init__()
         self.D = D
         self.W = W
         self.input_ch = input_ch
         self.output_ch = output_ch
         self.t_multires = 6 if is_blender else 10
-        self.skips = [D // 2]
+        self.skips = skips if skips is not None else []
         self.output_scale = output_scale
         self.is_blender = is_blender
         self.is_6dof = is_6dof

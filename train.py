@@ -32,7 +32,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_model_path):
     # tune parameters to fit in different sequence lengths
     full_iteration = opt.iterations
     opt.iterations = round((full_iteration - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
@@ -54,6 +54,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     #start training
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
+
+    
+
     if dataset.is_ode:
         print("Using ODE for deformation")
         deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch,
@@ -65,9 +68,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         print("Using iterative update with decay factor: {}".format(opt.iterative_update_decay))
         print("Iterative update interval: {} iterations".format(opt.iterative_update_interval))
     deform.train_setting(opt)
-
-    scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    
+    if(base_model_path != ""):
+        print("Loading base model from: {}".format(base_model_path))
+        temp_model_path = dataset.model_path
+        dataset.model_path = base_model_path
+        scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False)
+        dataset.model_path = temp_model_path
+    else:
+        scene = Scene(dataset, gaussians)
+        gaussians.training_setup(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -174,10 +184,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
                 "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
             # depth = render_pkg_re["depth"]
-            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
-                                                                 radii[visibility_filter])
-            visibility_filter_list.append(visibility_filter)
-            render_pkg_re_list.append(render_pkg_re)
+            if base_model_path == "":
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
+                                                                    radii[visibility_filter])
+                visibility_filter_list.append(visibility_filter)
+                render_pkg_re_list.append(render_pkg_re)
 
         # Loss
             gt_image = viewpoint_cam.original_image.cuda()
@@ -217,7 +228,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                 deform.save_weights(dataset.model_path, iteration)
 
             # Densification
-            if iteration < opt.densify_until_iter:
+            if iteration < opt.densify_until_iter and base_model_path == "":
                 for visibility_filter, render_pkg_re in zip(visibility_filter_list, render_pkg_re_list):
                     viewspace_point_tensor_densify = render_pkg_re["viewspace_points_densify"]
                     gaussians.add_densification_stats(viewspace_point_tensor_densify, visibility_filter)
@@ -253,13 +264,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
                         deform.update_learning_rate(iteration)
                 else:
                     # Simultaneous optimization or original update logic
-                    gaussians.optimizer.step()
-                    gaussians.update_learning_rate(iteration)
+                    if base_model_path == "":
+                        gaussians.optimizer.step()
+                        gaussians.update_learning_rate(iteration)
                     deform.optimizer.step()
                     deform.update_learning_rate(iteration)
 
                 # Zero gradients
-                gaussians.optimizer.zero_grad(set_to_none=True)
+                if base_model_path == "":
+                    gaussians.optimizer.zero_grad(set_to_none=True)
                 deform.optimizer.zero_grad()
 
 
@@ -363,13 +376,17 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--base_model_path", type=str, default="")
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
+    
     if args.configs:
         import mmcv
         from utils.params_utils import merge_hparams
         config = mmcv.Config.fromfile(args.configs)
         args = merge_hparams(args, config)
+
+    print("also saving at itration :{}".format(args.iterations))
+    args.save_iterations.append(args.iterations)
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
@@ -378,7 +395,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.base_model_path)
 
     # All done
     print("\nTraining complete.")

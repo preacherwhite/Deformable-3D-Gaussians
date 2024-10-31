@@ -1,5 +1,5 @@
 ModelParams = dict(
-    is_ode = True,
+    is_ode = False,
     D = 8,
     W = 256,
     use_linear = 0,
@@ -9,7 +9,7 @@ ModelParams = dict(
 
 OptimizationParams = dict(
     scale_lr = False,
-    direct_compute = True,
+    direct_compute = False,
     sequence_length = 150,
     num_cams_per_iter = 60,
     spread_out_sequence = True,
@@ -22,7 +22,7 @@ OptimizationParams = dict(
     # iterative_update_decay = 0.8,
     # iterative_update_interval = 200,
     # max_training_switches = 15,
-    iterations = 150000,
+    iterations = 40000,
     warm_up = 0,
     #weight_decay = 0.0001
     #densify_until_iter = 3000,
