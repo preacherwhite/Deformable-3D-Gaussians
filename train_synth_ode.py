@@ -35,7 +35,7 @@ def create_quadratic_trajectory(start_point, end_point, num_points):
     return trajectory
 
 
-def training(dataset, opt, saving_iterations, plot_interval):
+def training(dataset, opt, saving_iterations, plot_interval, full_calculation):
     # Create output directory
     os.makedirs(dataset.model_path, exist_ok=True)
 
@@ -63,8 +63,8 @@ def training(dataset, opt, saving_iterations, plot_interval):
         # Get the initial values for the batch
         batch_y0 = trajectory[s]  # (M, D)
         
-        # Get the time steps for the batch
-        batch_t = torch.arange(opt.num_cams_per_iter, device=device)  # (T)
+        # Get the time steps for the batch, starting from each sequence location
+        batch_t = (s.unsqueeze(-1).to(device) + torch.arange(opt.num_cams_per_iter, device=device)).float()  # (M, T)
         
         # Get the true values for the batch over the time steps
         batch_y = torch.stack([trajectory[s + i] for i in range(opt.num_cams_per_iter)], dim=0)  # (T, M, D)
@@ -98,34 +98,48 @@ def training(dataset, opt, saving_iterations, plot_interval):
             # Generate full trajectory prediction in batches
             # Generate full trajectory prediction
             with torch.no_grad():
-                # Calculate number of bins needed
-                num_bins = opt.sequence_length // opt.num_cams_per_iter
-                if opt.sequence_length % opt.num_cams_per_iter != 0:
-                    num_bins += 1
+                if full_calculation:
+                    # Start from initial point (frame 0)
+                    initial_point = trajectory[0:1].to('cuda')
+                    
+                    # Generate time steps for full sequence
+                    t = torch.arange(opt.sequence_length, device='cuda').float()
+                    
+                    # Get full trajectory prediction
+                    predicted_xyz, _, _ = deform.step(initial_point, t)
+                    
+                    # Convert to numpy for plotting
+                    predicted_trajectory = predicted_xyz.squeeze().cpu().numpy()
+                    actual_trajectory = trajectory.cpu().numpy()
+                else:
+                    # Calculate number of bins needed
+                    num_bins = opt.sequence_length // opt.num_cams_per_iter
+                    if opt.sequence_length % opt.num_cams_per_iter != 0:
+                        num_bins += 1
 
-                # Initialize list to store predicted trajectories
-                predicted_trajectories = []
-                
-                # Start from initial point
-                current_point = trajectory[0:1].to('cuda')
-                t = torch.arange(opt.num_cams_per_iter, device='cuda').float()
-                # Process each bin sequentially
-                for bin_idx in range(num_bins):
-                    # Get predicted trajectory for this bin
-                    predicted_xyz, _, _ = deform.step(current_point, t)
+                    # Initialize list to store predicted trajectories
+                    predicted_trajectories = []
                     
-                    # Store the predictions
-                    predicted_trajectories.append(predicted_xyz.squeeze())
+                    # Start from initial point
+                    current_point = trajectory[0:1].to('cuda')
+                    t = torch.arange(opt.num_cams_per_iter, device='cuda').float()
+                    # Process each bin sequentially
+                    for bin_idx in range(num_bins):
+                        # Get predicted trajectory for this bin
+                        predicted_xyz, _, _ = deform.step(current_point, t)
+                        
+                        # Store the predictions
+                        predicted_trajectories.append(predicted_xyz.squeeze())
+                        
+                        # Update current_point to last predicted point for next iteration
+                        current_point = predicted_xyz[-1:] # Keep batch dimension
                     
-                    # Update current_point to last predicted point for next iteration
-                    current_point = predicted_xyz[-1:] # Keep batch dimension
-                
-                # Concatenate all predictions
-                predicted_trajectory = torch.cat(predicted_trajectories, dim=0)
-                predicted_trajectory = predicted_trajectory[:opt.sequence_length].cpu().numpy()
-                
-                # Get actual trajectory for comparison
-                actual_trajectory = trajectory.cpu().numpy()
+                    # Concatenate all predictions
+                    predicted_trajectory = torch.cat(predicted_trajectories, dim=0)
+                    predicted_trajectory = predicted_trajectory[:opt.sequence_length].cpu().numpy()
+                    
+                    # Get actual trajectory for comparison
+                    actual_trajectory = trajectory.cpu().numpy()
             # Create figure for predicted trajectory
             fig_pred = plt.figure(figsize=(10, 8))
             ax_pred = fig_pred.add_subplot(111, projection='3d')
@@ -229,9 +243,9 @@ if __name__ == "__main__":
 
     parser.add_argument("--save_iterations", nargs="+", type=int, default=list(range(1000, 150001, 2000)))
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--base_model_path", type=str, default="")
     parser.add_argument("--configs", type=str, default = "")
     parser.add_argument("--plot_interval", type=int, default=20)
+    parser.add_argument("--full_sequence",type=bool, default=True)
     args = parser.parse_args(sys.argv[1:])
  
     if args.configs:
@@ -246,6 +260,6 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), args.save_iterations, args.plot_interval)
+    training(lp.extract(args), op.extract(args), args.save_iterations, args.plot_interval,args.full_sequence)
 
 
