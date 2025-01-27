@@ -9,3 +9,7 @@ diff_rasterization/dist
 tensorboard_3d
 screenshots
 .idea
+data
+logs
+results
+forecast_exp
