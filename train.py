@@ -15,7 +15,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim, kl_divergence
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel, DeformModel, DeformModelODE
+from scene import Scene, GaussianModel, DeformModel, DeformModelODE, DeformModelTORCHODEStart
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
@@ -53,13 +53,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
 
     #start training
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree)
-
-    
+    gaussians = GaussianModel(dataset.sh_degree)    
 
     if dataset.is_ode:
-        print("Using ODE for deformation")
-        deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch,
+        if dataset.use_torch_ode:
+            print("Using TORCH ODE for deformation")
+            deform = DeformModelTORCHODEStart(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch,
+                                 multires=dataset.multires) 
+        else:
+            print("Using ODE for deformation")
+            deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch,
                                  multires=dataset.multires, scale_lr = opt.scale_lr, use_linear=dataset.use_linear, use_emb=dataset.use_emb, rtol=opt.rtol, atol=opt.atol, output_scale = dataset.output_scale) 
     else:
         print("Using DeformModel")
@@ -118,10 +121,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
         # Pick a random Camera
         if not viewpoint_stack or iteration == opt.warm_up:
             viewpoint_stack = scene.getTrainCameras().copy()
+            # Print all fids in the viewpoint stack
             if iteration >= opt.warm_up:
                 # Sort the viewpoints by fid
-                viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
-                
+                # TODO: Remove the first viewpoint from the stack due to repeated fit, check later
+                viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)[1:]
                 # Calculate the total number of viewpoints
                 total_viewpoints = len(viewpoint_stack)
                 
@@ -134,6 +138,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
                     viewpoint_stack = [viewpoint_stack[i] for i in selected_indices]
                 else:
                     viewpoint_stack = viewpoint_stack[:opt.sequence_length]
+                    
 
         total_frame = len(viewpoint_stack)
 
@@ -150,10 +155,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
             sampled_indices = random.sample(range(len(viewpoint_stack)), k)
             sampled_indices.sort()  # Sort to maintain temporal order
             sampled_cams = [viewpoint_stack[i] for i in sampled_indices]
+            
             # Remove the sampled cameras from the stack
             viewpoint_stack = [cam for i, cam in enumerate(viewpoint_stack) if i not in sampled_indices]
             sampled_fids = [viewpoint_cam.fid for viewpoint_cam in sampled_cams]
-            
             # N = gaussians.get_xyz.shape[0]
             # time_input = fid.unsqueeze(0).expand(N, -1)
 
@@ -161,9 +166,51 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
 
             # Deform is called to calculate gaussian parameters at time t according to the current viewpoint camera. We need to change this so 
             # A series of t from a series of viewpoints are used to calculate the gaussian parameters at different time frames
-            d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
 
-
+            #TODO: Why the detach? Need to experiment without it. (Note: 4D Gaussian paper does not have the stop gradient operation)
+            
+            max_batch_gaussians = opt.max_batch_gaussians 
+            if max_batch_gaussians > 0:
+                num_gaussians = gaussians.get_xyz.shape[0]
+                num_batches = (num_gaussians + max_batch_gaussians - 1) // max_batch_gaussians # Ceiling division
+                
+                if dataset.use_torch_ode:
+                    #can't use detach here because we won't be using gaussians later in training
+                    sampled_fids = torch.Tensor(sampled_fids).repeat(max_batch_gaussians,1).to(gaussians.get_xyz.device)
+                # Initialize lists to store results
+                d_xyz_list_batched = []
+                d_rotation_list_batched = []
+                d_scaling_list_batched = []
+                
+                # Process gaussians in batches
+                for i in range(num_batches):
+                    start_idx = i * max_batch_gaussians
+                    end_idx = min((i + 1) * max_batch_gaussians, num_gaussians)
+                    
+                    batch_xyz = gaussians.get_xyz[start_idx:end_idx]
+                    
+                    if dataset.use_torch_ode:
+                        d_xyz, d_rotation, d_scaling = deform.step(batch_xyz, sampled_fids, batch_xyz)
+                    else:
+                        d_xyz, d_rotation, d_scaling = deform.step(batch_xyz, sampled_fids)
+                    
+                    # Append batch results
+                    d_xyz_list_batched.append(d_xyz)
+                    d_rotation_list_batched.append(d_rotation)
+                    d_scaling_list_batched.append(d_scaling)
+                
+                # Concatenate results from all batches
+                d_xyz_list = [torch.cat([batch[i] for batch in d_xyz_list_batched], dim=0) for i in range(len(d_xyz_list_batched[0]))]
+                d_rotation_list = [torch.cat([batch[i] for batch in d_rotation_list_batched], dim=0) for i in range(len(d_rotation_list_batched[0]))]
+                d_scaling_list = [torch.cat([batch[i] for batch in d_scaling_list_batched], dim=0) for i in range(len(d_scaling_list_batched[0]))]
+            else:
+                if dataset.use_torch_ode:
+                    d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz, sampled_fids, gaussians.get_xyz)
+                else:
+                    d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
+                    # print(f"gaussians.get_xyz: {gaussians.get_xyz.shape}")
+                    # print(f"d_xyz_list: {d_xyz_list.shape}, d_rotation_list: {d_rotation_list.shape}, d_scaling_list: {d_scaling_list.shape}")
+        
         
         loss = 0.0
         Ll1 = 0.0
@@ -328,7 +375,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     fid = viewpoint.fid
                     xyz = scene.gaussians.get_xyz
                     #time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-                    d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), [fid])
+                    d_xyz, d_rotation, d_scaling = deform.step(xyz, [fid])
+                    if is_ode:
+                        d_rotation = None
+                        d_scaling = None
                     image = torch.clamp(
                         renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof, direct_compute=is_ode)["render"],
                         0.0, 1.0)

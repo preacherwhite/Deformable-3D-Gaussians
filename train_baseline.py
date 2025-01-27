@@ -15,7 +15,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim, kl_divergence
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel, DeformModel
+from scene import Scene, GaussianModel, DeformModelBaseline
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
@@ -34,7 +34,7 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    deform = DeformModel(dataset.is_blender, dataset.is_6dof)
+    deform = DeformModelBaseline(dataset.is_blender, dataset.is_6dof)
     deform.train_setting(opt)
 
     scene = Scene(dataset, gaussians)
@@ -46,6 +46,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
 
+    print(f"training on sequence_length: {opt.sequence_length}")
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     best_psnr = 0.0
@@ -79,6 +80,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_stack = sorted(viewpoint_stack, key=lambda x: x.fid)
+
+            total_viewpoints = len(viewpoint_stack)
+                
+            # Calculate the step size for uniform distribution
+            step = (total_viewpoints - 1) / (opt.sequence_length - 1)
+            selected_indices = [int(round(i * step)) for i in range(opt.sequence_length)]
+            viewpoint_stack = [viewpoint_stack[i] for i in selected_indices]
 
         total_frame = len(viewpoint_stack)
         time_interval = 1 / total_frame

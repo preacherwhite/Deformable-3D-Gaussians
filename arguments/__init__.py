@@ -49,7 +49,7 @@ class ParamGroup:
 
 class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
-        self.is_ode = True
+        self.is_ode = False
         self.sh_degree = 3
         self._source_path = ""
         self._model_path = ""
@@ -59,7 +59,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.load2gpu_on_the_fly = False
-        self.is_blender = False
+        self.is_blender = True
         self.is_6dof = False
         self.max_gaussians = 500000
         self.D = 8
@@ -102,9 +102,10 @@ class OptimizationParams(ParamGroup):
         self.iterative_update_decay = 0.9
         self.iterative_update_interval = 1000
         self.max_training_switches  = 5
+        self.max_batch_gaussians = -1
 
         self.iterations = 40_000
-        self.warm_up = 3_000
+        self.warm_up = 3000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01

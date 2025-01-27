@@ -10,7 +10,7 @@
 #
 
 import torch
-from scene import Scene, DeformModel, DeformModelODE
+from scene import Scene, DeformModel, DeformModelODE, DeformModelTORCHODE
 import os
 from tqdm import tqdm
 from os import makedirs
@@ -54,13 +54,15 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
     for frame, view in enumerate(tqdm(views, desc="Collecting trajectory data")):
         fid = view.fid
         xyz = gaussians.get_xyz
-        d_xyz, _, _ = deform.step(xyz.detach(), [fid])
+        fid = torch.Tensor([fid]).unsqueeze(0).cuda().repeat(xyz.shape[0], 1)
+
+        d_xyz, _, _ = deform.step(xyz.detach(), fid)
         if deform_reference is not None:
-            d_xyz_ref, _, _ = deform_reference.step(xyz.detach(), [fid])
+            d_xyz_ref, _, _ = deform_reference.step(xyz.detach(), fid)
             trajectories_ref[:, frame, :] = (xyz[sampled_indices] + d_xyz_ref[0][sampled_indices]).cpu().numpy()
         # Store the positions of sampled Gaussians
         if is_ode:
-            trajectories[:, frame, :] = (d_xyz[0][sampled_indices]).cpu().numpy()
+            trajectories[:, frame, :] = (d_xyz[sampled_indices]).cpu().numpy()
         else:
             trajectories[:, frame, :] = (xyz[sampled_indices] + d_xyz[0][sampled_indices]).cpu().numpy()
         
@@ -134,10 +136,12 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
             view.load2device()
         fid = view.fid
         xyz = gaussians.get_xyz
-        #time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), [fid])
+        fid = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), fid)
         #d_xyz, d_rotation, d_scaling = [0.0], [0.0], [0.0]
-        results = render(view, gaussians, pipeline, background, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof, direct_compute=is_ode)
+        d_scaling = torch.zeros_like(d_xyz)
+        d_rotation = torch.zeros(d_xyz.shape[0], 4).cuda()
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, direct_compute=is_ode)
         rendering = results["render"]
         depth = results["depth"]
         depth = depth / (depth.max() + 1e-5)
@@ -147,21 +151,23 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        fid = view.fid
-        xyz = gaussians.get_xyz
-        #time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+    # for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+    #     fid = view.fid
+    #     xyz = gaussians.get_xyz
+    #     fid = fid.unsqueeze(0).expand(xyz.shape[0], -1)
 
-        torch.cuda.synchronize()
-        t_start = time.time()
+    #     torch.cuda.synchronize()
+    #     t_start = time.time()
 
-        #d_xyz, d_rotation, d_scaling = [0.0], [0.0], [0.0]
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), [fid])
-        results = render(view, gaussians, pipeline, background, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof, direct_compute=is_ode)
+    #     #d_xyz, d_rotation, d_scaling = [0.0], [0.0], [0.0]
+    #     d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), fid)
+    #     d_scaling = torch.zeros_like(d_xyz)
+    #     d_rotation = torch.zeros(d_xyz.shape[0], 4).cuda()
+    #     results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof, direct_compute=is_ode)
 
-        torch.cuda.synchronize()
-        t_end = time.time()
-        t_list.append(t_end - t_start)
+    #     torch.cuda.synchronize()
+    #     t_end = time.time()
+    #     t_list.append(t_end - t_start)
 
     t = np.array(t_list[5:])
     fps = 1.0 / t.mean()
@@ -396,7 +402,9 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         gaussians = GaussianModel(dataset.sh_degree)
         print("attempting to load gaussians from iteration {}".format(iteration))
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        if dataset.is_ode:  
+        if dataset.use_torch_ode:
+            deform = DeformModelTORCHODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
+        elif dataset.is_ode:  
             deform =  DeformModelODE(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires, use_linear=dataset.use_linear, use_emb=dataset.use_emb)
         else:
             deform = DeformModel(dataset.is_blender, dataset.is_6dof, dataset.D, dataset.W, dataset.input_ch, dataset.output_ch, dataset.multires)
@@ -427,7 +435,7 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
                         scene.getTrainCameras(), gaussians, pipeline,
                         background, deform, dataset.is_ode, trajectory_only,gau_index, deform_refernece, k)
-
+        print(len(scene.getTestCameras()))
         if not skip_test:
             render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
