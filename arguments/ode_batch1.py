@@ -5,7 +5,6 @@ ModelParams = dict(
     use_linear = 0,
     use_emb = True,
     use_torch_ode = False,
-    max_gaussians = 10000
 )
 
 OptimizationParams = dict(
@@ -13,8 +12,8 @@ OptimizationParams = dict(
     direct_compute = True,
     sequence_length = 30,
     num_cams_per_iter = 10,
-    spread_out_sequence = False,
-    position_lr_init = 0.00001,
+    spread_out_sequence = True,
+    position_lr_init = 2e-5,
     position_lr_final = 0.0000001,
     rtol = 1e-4,
     atol = 1e-5,
@@ -22,5 +21,5 @@ OptimizationParams = dict(
     warm_up = 3000,
     #densify_until_iter = 3000,
     max_batch_gaussians = -1,
-    iterations = 80000
+    iterations = 20000
 )

@@ -15,7 +15,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim, kl_divergence
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel, DeformModel, DeformModelODE, DeformModelTORCHODEStart
+from scene import Scene, GaussianModel, DeformModel, DeformModelODE, DeformModelTORCHODEStart, DeformModelBaseline
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
@@ -34,11 +34,8 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_model_path):
     # tune parameters to fit in different sequence lengths
-    full_iteration = opt.iterations
-    opt.iterations = round((full_iteration - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
+    opt.iterations = opt.iterations
     opt.deform_lr_max_steps = opt.iterations
-    opt.position_lr_max_steps = round((opt.position_lr_max_steps - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
-    opt.densify_until_iter = round((opt.densify_until_iter - opt.warm_up) * (opt.sequence_length / 150) + opt.warm_up)
 
     opt.use_iterative_update = getattr(opt, 'use_iterative_update', False)
     opt.iterative_update_decay = getattr(opt, 'iterative_update_decay', 0.9)
@@ -65,8 +62,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
             deform = DeformModelODE(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch,
                                  multires=dataset.multires, scale_lr = opt.scale_lr, use_linear=dataset.use_linear, use_emb=dataset.use_emb, rtol=opt.rtol, atol=opt.atol, output_scale = dataset.output_scale) 
     else:
-        print("Using DeformModel")
-        deform = DeformModel(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires, scale_lr = opt.scale_lr)
+        print("Using DeformModelBaseline")
+        deform = DeformModelBaseline(dataset.is_blender, dataset.is_6dof, D=dataset.D, W=dataset.W, input_ch=dataset.input_ch, output_ch=dataset.output_ch, multires=dataset.multires)
     if opt.use_iterative_update:
         print("Using iterative update with decay factor: {}".format(opt.iterative_update_decay))
         print("Iterative update interval: {} iterations".format(opt.iterative_update_interval))
@@ -98,10 +95,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
     non_warmup_iterations = opt.iterations - opt.warm_up
     iterations = opt.warm_up + (non_warmup_iterations // batch_size)
     progress_bar = tqdm(range(iterations), desc="Training progress")
-
-    testing_iterations = [opt.warm_up + ((it - opt.warm_up) // batch_size)for it in testing_iterations]
-    
-    saving_iterations = [opt.warm_up + ((it - opt.warm_up)  // batch_size) for it in saving_iterations]
     saving_iterations.append(iterations)
     smooth_term = get_linear_noise_func(lr_init=0.1, lr_final=1e-15, lr_delay_mult=0.01, max_steps=20000)
 
@@ -206,8 +199,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
             else:
                 if dataset.use_torch_ode:
                     d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz, sampled_fids, gaussians.get_xyz)
-                else:
+                elif dataset.is_ode:
                     d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
+                else:
+                    # expand the sampled_fids to match the shape of gaussians.get_xyz
+                    # for baseline we will always use batch size 1
+                    sampled_fids = sampled_fids[0].unsqueeze(0).expand(gaussians.get_xyz.shape[0], -1)
+                    d_xyz_list, d_rotation_list, d_scaling_list = deform.step(gaussians.get_xyz.detach(), sampled_fids)
+                    d_xyz_list = [d_xyz_list[0]]
+                    d_rotation_list = [d_rotation_list[0]]
+                    d_scaling_list = [d_scaling_list[0]]
                     # print(f"gaussians.get_xyz: {gaussians.get_xyz.shape}")
                     # print(f"d_xyz_list: {d_xyz_list.shape}, d_rotation_list: {d_rotation_list.shape}, d_scaling_list: {d_scaling_list.shape}")
         
@@ -217,7 +218,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, base_mod
         visibility_filter_list = []
         render_pkg_re_list = []
         
-        assert len(sampled_cams) == len(d_xyz_list)
+        if len(sampled_cams) != len(d_xyz_list):
+            print(f"Length mismatch: sampled_cams ({len(sampled_cams)}) != d_xyz_list ({len(d_xyz_list)})")
+            assert False
         for viewpoint_cam, d_xyz, d_rotation, d_scaling in zip(sampled_cams, d_xyz_list, d_rotation_list, d_scaling_list):
             if dataset.load2gpu_on_the_fly:
                 viewpoint_cam.load2device()
@@ -375,13 +378,20 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     fid = viewpoint.fid
                     xyz = scene.gaussians.get_xyz
                     #time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-                    d_xyz, d_rotation, d_scaling = deform.step(xyz, [fid])
+
                     if is_ode:
-                        d_rotation = None
-                        d_scaling = None
-                    image = torch.clamp(
+                        d_xyz, d_rotation, d_scaling = deform.step(xyz, [fid])
+
+                        image = torch.clamp(
+                        renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz, d_rotation, d_scaling, is_6dof, direct_compute=is_ode)["render"],
+                        0.0, 1.0)
+                    else:
+                        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+                        d_xyz, d_rotation, d_scaling = deform.step(xyz, time_input)
+                        image = torch.clamp(
                         renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz[0], d_rotation[0], d_scaling[0], is_6dof, direct_compute=is_ode)["render"],
                         0.0, 1.0)
+                    
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     images = torch.cat((images, image.unsqueeze(0)), dim=0)
                     gts = torch.cat((gts, gt_image.unsqueeze(0)), dim=0)
@@ -422,7 +432,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int,
-                        default=[7000, 8000, 9000] + list(range(10000, 40001, 1000)))
+                        default=[3005,7000, 8000, 9000] + list(range(10000, 40001, 1000)))
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 7_000, 10_000, 20_000, 30_000, 40000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--configs", type=str, default = "")

@@ -189,7 +189,7 @@ class DeformModelODE:
         is_val = len(time_emb) == 1
         zero_start = time_emb[0] == 0
         if zero_start.item() and is_val:
-            return [xyz] , [torch.zeros([xyz.shape[0], 4]).to(xyz.device)], [torch.zeros([xyz.shape[0],3]).to(xyz.device)]
+            return xyz, torch.zeros([xyz.shape[0], 4]).to(xyz.device), torch.zeros([xyz.shape[0],3]).to(xyz.device)
         # if not zero_start:
         #     time_emb = [0.0] + time_emb
 
@@ -197,15 +197,14 @@ class DeformModelODE:
         ode_value = odeint_adjoint(self.deform, xyz,t_interval, rtol= self.rtol, atol=self.atol)
         xyz_new = torch.squeeze(ode_value)
 
-        if is_val:
-            if not zero_start:
-                xyz_new = xyz_new[1].unsqueeze(0)
+        # if is_val:
+        #     if not zero_start:
+        #         xyz_new = xyz_new[1].unsqueeze(0)
         # elif not zero_start:
         #     xyz_new = xyz_new[1:]
-        rotation_placeholder = torch.zeros([xyz_new.shape[0],xyz_new.shape[1], 4]).to(xyz.device)
-        scale_placeholder = torch.zeros([xyz_new.shape[0],xyz_new.shape[1],3]).to(xyz.device)
-
-        return xyz_new, rotation_placeholder , scale_placeholder
+        rotation = torch.zeros([xyz_new.shape[0],xyz_new.shape[1], 4]).to(xyz.device)
+        scale = torch.zeros([xyz_new.shape[0],xyz_new.shape[1], 3]).to(xyz.device)
+        return xyz_new, rotation, scale
 
         #return self.deform(xyz, time_emb)
         #return [0.0], [0.0], [0.0]
