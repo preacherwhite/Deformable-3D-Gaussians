@@ -51,11 +51,11 @@ class TimeSeriesDataset(Dataset):
 
 def main():
     # Hyperparameters
-    INPUT_LENGTH = 12  # Input sequence length
-    TARGET_LENGTH = 6  # Target sequence length
+    INPUT_LENGTH = 80  # Input sequence length
+    TARGET_LENGTH = 30  # Target sequence length
     BATCH_SIZE = 1024
     NUM_EPOCHS = 10
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 1e-3
 
     # Load dataset
     print("Loading dataset...")
@@ -63,42 +63,37 @@ def main():
 
     # Split into train and validation
     train_size = int(0.8 * data.shape[0])
-    train_data, val_data = data[:train_size], data[train_size:]
+    train_data = data[:train_size]
 
     # Create datasets
     train_dataset = TimeSeriesDataset(train_data, INPUT_LENGTH, TARGET_LENGTH)
-    val_dataset = TimeSeriesDataset(val_data, INPUT_LENGTH, TARGET_LENGTH)
 
     # Model Configuration
     print("Initializing model...")
     config = TimeSeriesTransformerConfig(
         prediction_length=TARGET_LENGTH,
-        context_length=INPUT_LENGTH,
+        context_length=INPUT_LENGTH-5,
         input_size=train_dataset.num_features,
         num_decoder_layers=4,
         num_encoder_layers=4,
         d_model=128,
         num_time_features = 1,
-        lags_sequence = [0]
+        lags_sequence = [1,2,3,4,5]
     )
     model = TimeSeriesTransformerForPrediction(config)
 
     # Training Arguments
     training_args = TrainingArguments(
-        output_dir="./results",
-        evaluation_strategy="epoch",
+        output_dir="./results/target30",
         save_strategy="epoch",
         learning_rate=LEARNING_RATE,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
         num_train_epochs=NUM_EPOCHS,
         weight_decay=0.01,
-        logging_dir="./logs",
+        logging_dir="./logs/target30",
         logging_steps=10,
-        load_best_model_at_end=True,
         fp16=True,
-        metric_for_best_model="eval_runtime",
-        greater_is_better = False,
     )
 
     # Data Collator
@@ -115,7 +110,6 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,
         data_collator=collate_fn,
     )
 
@@ -125,7 +119,7 @@ def main():
 
     # Save the final model
     print("Saving model...")
-    model.save_pretrained("./forecast_exp")
+    model.save_pretrained("./forecast_exp/target30")
 
     print("Training complete!")
 
